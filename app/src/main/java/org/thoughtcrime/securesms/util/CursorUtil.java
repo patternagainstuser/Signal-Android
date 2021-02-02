@@ -18,6 +18,10 @@ public final class CursorUtil {
     return cursor.getInt(cursor.getColumnIndexOrThrow(column));
   }
 
+  public static float requireFloat(@NonNull Cursor cursor, @NonNull String column) {
+    return cursor.getFloat(cursor.getColumnIndexOrThrow(column));
+  }
+
   public static long requireLong(@NonNull Cursor cursor, @NonNull String column) {
     return cursor.getLong(cursor.getColumnIndexOrThrow(column));
   }
@@ -28,6 +32,14 @@ public final class CursorUtil {
 
   public static byte[] requireBlob(@NonNull Cursor cursor, @NonNull String column) {
     return cursor.getBlob(cursor.getColumnIndexOrThrow(column));
+  }
+
+  public static boolean requireMaskedBoolean(@NonNull Cursor cursor, @NonNull String column, int position) {
+    return Bitmask.read(requireLong(cursor, column), position);
+  }
+
+  public static int requireMaskedInt(@NonNull Cursor cursor, @NonNull String column, int position, int flagBitSize) {
+    return Util.toIntExact(Bitmask.read(requireLong(cursor, column), position, flagBitSize));
   }
 
   public static Optional<String> getString(@NonNull Cursor cursor, @NonNull String column) {

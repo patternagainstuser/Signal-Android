@@ -19,12 +19,12 @@ import androidx.navigation.Navigation;
 
 import com.dd.CircularProgressButton;
 
+import org.signal.core.util.logging.Log;
 import org.thoughtcrime.securesms.R;
 import org.thoughtcrime.securesms.dependencies.ApplicationDependencies;
 import org.thoughtcrime.securesms.jobs.StorageAccountRestoreJob;
 import org.thoughtcrime.securesms.keyvalue.SignalStore;
 import org.thoughtcrime.securesms.lock.v2.PinKeyboardType;
-import org.thoughtcrime.securesms.logging.Log;
 import org.thoughtcrime.securesms.pin.PinRestoreRepository.TokenData;
 import org.thoughtcrime.securesms.registration.service.CodeVerificationRequest;
 import org.thoughtcrime.securesms.registration.service.RegistrationService;
@@ -148,11 +148,13 @@ public final class RegistrationLockFragment extends BaseRegistrationFragment {
     int trimmedLength = pin.replace(" ", "").length();
     if (trimmedLength == 0) {
       Toast.makeText(requireContext(), R.string.RegistrationActivity_you_must_enter_your_registration_lock_PIN, Toast.LENGTH_LONG).show();
+      enableAndFocusPinEntry();
       return;
     }
 
     if (trimmedLength < MINIMUM_PIN_LENGTH) {
       Toast.makeText(requireContext(), getString(R.string.RegistrationActivity_your_pin_has_at_least_d_digits_or_characters, MINIMUM_PIN_LENGTH), Toast.LENGTH_LONG).show();
+      enableAndFocusPinEntry();
       return;
     }
 
@@ -304,6 +306,7 @@ public final class RegistrationLockFragment extends BaseRegistrationFragment {
 
     long startTime = System.currentTimeMillis();
     SimpleTask.run(() -> {
+      SignalStore.onboarding().clearAll();
       return ApplicationDependencies.getJobManager().runSynchronously(new StorageAccountRestoreJob(), StorageAccountRestoreJob.LIFESPAN);
     }, result -> {
       long elapsedTime = System.currentTimeMillis() - startTime;

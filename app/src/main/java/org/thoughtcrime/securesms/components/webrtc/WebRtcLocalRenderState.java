@@ -3,7 +3,8 @@ package org.thoughtcrime.securesms.components.webrtc;
 public enum WebRtcLocalRenderState {
   GONE,
   SMALL_RECTANGLE,
-  SMALL_SQUARE,
+  SMALLER_RECTANGLE,
   LARGE,
-  LARGE_NO_VIDEO
+  LARGE_NO_VIDEO,
+  EXPANDED
 }

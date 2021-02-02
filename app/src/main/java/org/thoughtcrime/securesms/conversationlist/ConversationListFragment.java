@@ -54,14 +54,12 @@ import androidx.appcompat.view.ActionMode;
 import androidx.appcompat.widget.Toolbar;
 import androidx.appcompat.widget.TooltipCompat;
 import androidx.core.content.res.ResourcesCompat;
-import androidx.core.view.ViewCompat;
 import androidx.fragment.app.DialogFragment;
 import androidx.lifecycle.DefaultLifecycleObserver;
 import androidx.lifecycle.LifecycleObserver;
 import androidx.lifecycle.LifecycleOwner;
 import androidx.lifecycle.ProcessLifecycleOwner;
 import androidx.lifecycle.ViewModelProviders;
-import androidx.paging.PagedList;
 import androidx.recyclerview.widget.ItemTouchHelper;
 import androidx.recyclerview.widget.LinearLayoutManager;
 import androidx.recyclerview.widget.RecyclerView;
@@ -72,7 +70,8 @@ import com.google.android.material.snackbar.Snackbar;
 import org.greenrobot.eventbus.EventBus;
 import org.greenrobot.eventbus.Subscribe;
 import org.greenrobot.eventbus.ThreadMode;
-import org.thoughtcrime.securesms.ApplicationContext;
+import org.signal.core.util.concurrent.SignalExecutors;
+import org.signal.core.util.logging.Log;
 import org.thoughtcrime.securesms.MainFragment;
 import org.thoughtcrime.securesms.MainNavigator;
 import org.thoughtcrime.securesms.NewConversationActivity;
@@ -81,7 +80,6 @@ import org.thoughtcrime.securesms.components.RatingManager;
 import org.thoughtcrime.securesms.components.SearchToolbar;
 import org.thoughtcrime.securesms.components.recyclerview.DeleteItemAnimator;
 import org.thoughtcrime.securesms.components.registration.PulsingFloatingActionButton;
-import org.thoughtcrime.securesms.components.reminder.DefaultSmsReminder;
 import org.thoughtcrime.securesms.components.reminder.DozeReminder;
 import org.thoughtcrime.securesms.components.reminder.ExpiredBuildReminder;
 import org.thoughtcrime.securesms.components.reminder.OutdatedBuildReminder;
@@ -89,8 +87,6 @@ import org.thoughtcrime.securesms.components.reminder.PushRegistrationReminder;
 import org.thoughtcrime.securesms.components.reminder.Reminder;
 import org.thoughtcrime.securesms.components.reminder.ReminderView;
 import org.thoughtcrime.securesms.components.reminder.ServiceOutageReminder;
-import org.thoughtcrime.securesms.components.reminder.ShareReminder;
-import org.thoughtcrime.securesms.components.reminder.SystemSmsImportReminder;
 import org.thoughtcrime.securesms.components.reminder.UnauthorizedReminder;
 import org.thoughtcrime.securesms.conversation.ConversationFragment;
 import org.thoughtcrime.securesms.conversationlist.model.Conversation;
@@ -104,8 +100,8 @@ import org.thoughtcrime.securesms.dependencies.ApplicationDependencies;
 import org.thoughtcrime.securesms.events.ReminderUpdateEvent;
 import org.thoughtcrime.securesms.insights.InsightsLauncher;
 import org.thoughtcrime.securesms.jobs.ServiceOutageDetectionJob;
+import org.thoughtcrime.securesms.keyvalue.SignalStore;
 import org.thoughtcrime.securesms.lock.v2.CreateKbsPinActivity;
-import org.thoughtcrime.securesms.logging.Log;
 import org.thoughtcrime.securesms.mediasend.MediaSendActivity;
 import org.thoughtcrime.securesms.megaphone.Megaphone;
 import org.thoughtcrime.securesms.megaphone.MegaphoneActionController;
@@ -118,17 +114,19 @@ import org.thoughtcrime.securesms.recipients.Recipient;
 import org.thoughtcrime.securesms.service.KeyCachingService;
 import org.thoughtcrime.securesms.sms.MessageSender;
 import org.thoughtcrime.securesms.storage.StorageSyncHelper;
+import org.thoughtcrime.securesms.util.AppStartup;
 import org.thoughtcrime.securesms.util.AvatarUtil;
 import org.thoughtcrime.securesms.util.PlayStoreUtil;
 import org.thoughtcrime.securesms.util.ServiceUtil;
 import org.thoughtcrime.securesms.util.SnapToTopDataObserver;
 import org.thoughtcrime.securesms.util.StickyHeaderDecoration;
+import org.thoughtcrime.securesms.util.Stopwatch;
 import org.thoughtcrime.securesms.util.TextSecurePreferences;
-import org.thoughtcrime.securesms.util.Util;
 import org.thoughtcrime.securesms.util.ViewUtil;
-import org.thoughtcrime.securesms.util.concurrent.SignalExecutors;
+import org.thoughtcrime.securesms.util.WindowUtil;
 import org.thoughtcrime.securesms.util.concurrent.SimpleTask;
 import org.thoughtcrime.securesms.util.task.SnackbarAsyncTask;
+import org.thoughtcrime.securesms.util.views.Stub;
 import org.whispersystems.libsignal.util.guava.Optional;
 
 import java.util.Collections;
@@ -149,26 +147,20 @@ public class ConversationListFragment extends MainFragment implements ActionMode
                                                                       MegaphoneActionController
 {
   public static final short MESSAGE_REQUESTS_REQUEST_CODE_CREATE_NAME = 32562;
+  public static final short SMS_ROLE_REQUEST_CODE                     = 32563;
 
   private static final String TAG = Log.tag(ConversationListFragment.class);
 
   private static final int MAXIMUM_PINNED_CONVERSATIONS = 4;
 
-  private static final int[] EMPTY_IMAGES = new int[] { R.drawable.empty_inbox_1,
-                                                        R.drawable.empty_inbox_2,
-                                                        R.drawable.empty_inbox_3,
-                                                        R.drawable.empty_inbox_4,
-                                                        R.drawable.empty_inbox_5 };
-
   private ActionMode                        actionMode;
   private RecyclerView                      list;
-  private ReminderView                      reminderView;
-  private View                              emptyState;
-  private ImageView                         emptyImage;
+  private Stub<ReminderView>                reminderView;
+  private Stub<ViewGroup>                   emptyState;
   private TextView                          searchEmptyState;
   private PulsingFloatingActionButton       fab;
   private PulsingFloatingActionButton       cameraFab;
-  private SearchToolbar                     searchToolbar;
+  private Stub<SearchToolbar>               searchToolbar;
   private ImageView                         searchAction;
   private View                              toolbarShadow;
   private ConversationListViewModel         viewModel;
@@ -176,10 +168,12 @@ public class ConversationListFragment extends MainFragment implements ActionMode
   private ConversationListAdapter           defaultAdapter;
   private ConversationListSearchAdapter     searchAdapter;
   private StickyHeaderDecoration            searchAdapterDecoration;
-  private ViewGroup                         megaphoneContainer;
+  private Stub<ViewGroup>                   megaphoneContainer;
   private SnapToTopDataObserver             snapToTopDataObserver;
   private Drawable                          archiveDrawable;
   private LifecycleObserver                 visibilityLifecycleObserver;
+
+  private Stopwatch startupStopwatch;
 
   public static ConversationListFragment newInstance() {
     return new ConversationListFragment();
@@ -189,6 +183,7 @@ public class ConversationListFragment extends MainFragment implements ActionMode
   public void onCreate(Bundle icicle) {
     super.onCreate(icicle);
     setHasOptionsMenu(true);
+    startupStopwatch = new Stopwatch("startup");
   }
 
   @Override
@@ -198,27 +193,23 @@ public class ConversationListFragment extends MainFragment implements ActionMode
 
   @Override
   public void onViewCreated(@NonNull View view, @Nullable Bundle savedInstanceState) {
-    reminderView       = view.findViewById(R.id.reminder);
     list               = view.findViewById(R.id.list);
     fab                = view.findViewById(R.id.fab);
     cameraFab          = view.findViewById(R.id.camera_fab);
-    emptyState         = view.findViewById(R.id.empty_state);
-    emptyImage         = view.findViewById(R.id.empty);
     searchEmptyState   = view.findViewById(R.id.search_no_results);
-    searchToolbar      = view.findViewById(R.id.search_toolbar);
     searchAction       = view.findViewById(R.id.search_action);
     toolbarShadow      = view.findViewById(R.id.conversation_list_toolbar_shadow);
-    megaphoneContainer = view.findViewById(R.id.megaphone_container);
+    reminderView       = new Stub<>(view.findViewById(R.id.reminder));
+    emptyState         = new Stub<>(view.findViewById(R.id.empty_state));
+    searchToolbar      = new Stub<>(view.findViewById(R.id.search_toolbar));
+    megaphoneContainer = new Stub<>(view.findViewById(R.id.megaphone_container));
 
-    Toolbar toolbar = view.findViewById(getToolbarRes());
+    Toolbar toolbar = getToolbar(view);
     toolbar.setVisibility(View.VISIBLE);
     ((AppCompatActivity) requireActivity()).setSupportActionBar(toolbar);
 
     fab.show();
     cameraFab.show();
-
-    reminderView.setOnDismissListener(this::updateReminders);
-    reminderView.setOnActionClickListener(this::onReminderAction);
 
     list.setLayoutManager(new LinearLayoutManager(requireActivity()));
     list.setItemAnimator(new DeleteItemAnimator());
@@ -233,15 +224,15 @@ public class ConversationListFragment extends MainFragment implements ActionMode
       Permissions.with(requireActivity())
                  .request(Manifest.permission.CAMERA)
                  .ifNecessary()
-                 .withRationaleDialog(getString(R.string.ConversationActivity_to_capture_photos_and_video_allow_signal_access_to_the_camera), R.drawable.ic_camera_solid_24)
+                 .withRationaleDialog(getString(R.string.ConversationActivity_to_capture_photos_and_video_allow_signal_access_to_the_camera), R.drawable.ic_camera_24)
                  .withPermanentDenialDialog(getString(R.string.ConversationActivity_signal_needs_the_camera_permission_to_take_photos_or_video))
                  .onAllGranted(() -> startActivity(MediaSendActivity.buildCameraFirstIntent(requireActivity())))
                  .onAnyDenied(() -> Toast.makeText(requireContext(), R.string.ConversationActivity_signal_needs_camera_permissions_to_take_photos_or_video, Toast.LENGTH_LONG).show())
                  .execute();
     });
 
-    initializeListAdapters();
     initializeViewModel();
+    initializeListAdapters();
     initializeTypingObserver();
     initializeSearchListener();
 
@@ -263,7 +254,7 @@ public class ConversationListFragment extends MainFragment implements ActionMode
 
     SimpleTask.run(getViewLifecycleOwner().getLifecycle(), Recipient::self, this::initializeProfileIcon);
 
-    if (!searchToolbar.isVisible() && list.getAdapter() != defaultAdapter) {
+    if ((!searchToolbar.resolved() || !searchToolbar.get().isVisible()) && list.getAdapter() != defaultAdapter) {
       list.removeItemDecoration(searchAdapterDecoration);
       setAdapter(defaultAdapter);
     }
@@ -329,10 +320,10 @@ public class ConversationListFragment extends MainFragment implements ActionMode
   }
 
   private boolean closeSearchIfOpen() {
-    if (searchToolbar.isVisible() || activeAdapter == searchAdapter) {
+    if ((searchToolbar.resolved() && searchToolbar.get().isVisible()) || activeAdapter == searchAdapter) {
       list.removeItemDecoration(searchAdapterDecoration);
       setAdapter(defaultAdapter);
-      searchToolbar.collapse();
+      searchToolbar.get().collapse();
       return true;
     }
 
@@ -429,6 +420,11 @@ public class ConversationListFragment extends MainFragment implements ActionMode
     dialogFragment.show(getChildFragmentManager(), "megaphone_dialog");
   }
 
+  private void initializeReminderView() {
+    reminderView.get().setOnDismissListener(this::updateReminders);
+    reminderView.get().setOnActionClickListener(this::onReminderAction);
+  }
+
   private void onReminderAction(@IdRes int reminderActionId) {
     if (reminderActionId == R.id.reminder_action_update_now) {
       PlayStoreUtil.openPlayStoreOrOurApkDownloadPage(requireContext());
@@ -449,45 +445,58 @@ public class ConversationListFragment extends MainFragment implements ActionMode
 
   private void initializeSearchListener() {
     searchAction.setOnClickListener(v -> {
-      searchToolbar.display(searchAction.getX() + (searchAction.getWidth() / 2.0f),
-                            searchAction.getY() + (searchAction.getHeight() / 2.0f));
-    });
+      searchToolbar.get().display(searchAction.getX() + (searchAction.getWidth() / 2.0f),
+                                  searchAction.getY() + (searchAction.getHeight() / 2.0f));
 
-    searchToolbar.setListener(new SearchToolbar.SearchListener() {
-      @Override
-      public void onSearchTextChange(String text) {
-        String trimmed = text.trim();
+      searchToolbar.get().setListener(new SearchToolbar.SearchListener() {
+        @Override
+        public void onSearchTextChange(String text) {
+          String trimmed = text.trim();
 
-        viewModel.updateQuery(trimmed);
+          viewModel.updateQuery(trimmed);
 
-        if (trimmed.length() > 0) {
-          if (activeAdapter != searchAdapter) {
-            setAdapter(searchAdapter);
-            list.removeItemDecoration(searchAdapterDecoration);
-            list.addItemDecoration(searchAdapterDecoration);
-          }
-        } else {
-          if (activeAdapter != defaultAdapter) {
-            list.removeItemDecoration(searchAdapterDecoration);
-            setAdapter(defaultAdapter);
+          if (trimmed.length() > 0) {
+            if (activeAdapter != searchAdapter) {
+              setAdapter(searchAdapter);
+              list.removeItemDecoration(searchAdapterDecoration);
+              list.addItemDecoration(searchAdapterDecoration);
+            }
+          } else {
+            if (activeAdapter != defaultAdapter) {
+              list.removeItemDecoration(searchAdapterDecoration);
+              setAdapter(defaultAdapter);
+            }
           }
         }
-      }
 
-      @Override
-      public void onSearchClosed() {
-        list.removeItemDecoration(searchAdapterDecoration);
-        setAdapter(defaultAdapter);
-      }
+        @Override
+        public void onSearchClosed() {
+          list.removeItemDecoration(searchAdapterDecoration);
+          setAdapter(defaultAdapter);
+        }
+      });
     });
   }
 
   private void initializeListAdapters() {
     defaultAdapter          = new ConversationListAdapter(GlideApp.with(this), this);
     searchAdapter           = new ConversationListSearchAdapter(GlideApp.with(this), this, Locale.getDefault());
-    searchAdapterDecoration = new StickyHeaderDecoration(searchAdapter, false, false);
+    searchAdapterDecoration = new StickyHeaderDecoration(searchAdapter, false, false, 0);
 
     setAdapter(defaultAdapter);
+
+    defaultAdapter.registerAdapterDataObserver(new RecyclerView.AdapterDataObserver() {
+      @Override
+      public void onItemRangeInserted(int positionStart, int itemCount) {
+        startupStopwatch.split("data-set");
+        defaultAdapter.unregisterAdapterDataObserver(this);
+        list.post(() -> {
+          AppStartup.getInstance().onCriticalRenderEventEnd();
+          startupStopwatch.split("first-render");
+          startupStopwatch.stop(TAG);
+        });
+      }
+    });
   }
 
   @SuppressWarnings("rawtypes")
@@ -500,6 +509,10 @@ public class ConversationListFragment extends MainFragment implements ActionMode
       return;
     }
 
+    if (adapter instanceof ConversationListAdapter) {
+      ((ConversationListAdapter) adapter).setPagingController(viewModel.getPagingController());
+    }
+
     list.setAdapter(adapter);
 
     if (adapter == defaultAdapter) {
@@ -510,7 +523,7 @@ public class ConversationListFragment extends MainFragment implements ActionMode
   }
 
   private void initializeTypingObserver() {
-    ApplicationContext.getInstance(requireContext()).getTypingStatusRepository().getTypingThreads().observe(this, threadIds -> {
+    ApplicationDependencies.getTypingStatusRepository().getTypingThreads().observe(this, threadIds -> {
       if (threadIds == null) {
         threadIds = Collections.emptySet();
       }
@@ -553,20 +566,22 @@ public class ConversationListFragment extends MainFragment implements ActionMode
 
   private void onMegaphoneChanged(@Nullable Megaphone megaphone) {
     if (megaphone == null) {
-      megaphoneContainer.setVisibility(View.GONE);
-      megaphoneContainer.removeAllViews();
+      if (megaphoneContainer.resolved()) {
+        megaphoneContainer.get().setVisibility(View.GONE);
+        megaphoneContainer.get().removeAllViews();
+      }
       return;
     }
 
     View view = MegaphoneViewBuilder.build(requireContext(), megaphone, this);
 
-    megaphoneContainer.removeAllViews();
+    megaphoneContainer.get().removeAllViews();
 
     if (view != null) {
-      megaphoneContainer.addView(view);
-      megaphoneContainer.setVisibility(View.VISIBLE);
+      megaphoneContainer.get().addView(view);
+      megaphoneContainer.get().setVisibility(View.VISIBLE);
     } else {
-      megaphoneContainer.setVisibility(View.GONE);
+      megaphoneContainer.get().setVisibility(View.GONE);
 
       if (megaphone.getOnVisibleListener() != null) {
         megaphone.getOnVisibleListener().onEvent(megaphone, this);
@@ -589,14 +604,8 @@ public class ConversationListFragment extends MainFragment implements ActionMode
         return Optional.of(new ServiceOutageReminder(context));
       } else if (OutdatedBuildReminder.isEligible()) {
         return Optional.of(new OutdatedBuildReminder(context));
-      } else if (DefaultSmsReminder.isEligible(context)) {
-        return Optional.of(new DefaultSmsReminder(context));
-      } else if (Util.isDefaultSmsProvider(context) && SystemSmsImportReminder.isEligible(context)) {
-        return Optional.of((new SystemSmsImportReminder(context)));
       } else if (PushRegistrationReminder.isEligible(context)) {
         return Optional.of((new PushRegistrationReminder(context)));
-      } else if (ShareReminder.isEligible(context)) {
-        return Optional.of(new ShareReminder(context));
       } else if (DozeReminder.isEligible(context)) {
         return Optional.of(new DozeReminder(context));
       } else {
@@ -604,9 +613,12 @@ public class ConversationListFragment extends MainFragment implements ActionMode
       }
     }, reminder -> {
       if (reminder.isPresent() && getActivity() != null && !isRemoving()) {
-        reminderView.showReminder(reminder.get());
-      } else if (!reminder.isPresent()) {
-        reminderView.hide();
+        if (!reminderView.resolved()) {
+          initializeReminderView();
+        }
+        reminderView.get().showReminder(reminder.get());
+      } else if (reminderView.resolved() && !reminder.isPresent()) {
+        reminderView.get().hide();
       }
     });
   }
@@ -719,7 +731,7 @@ public class ConversationListFragment extends MainFragment implements ActionMode
   private void handleDeleteAllSelected() {
     int                 conversationsCount = defaultAdapter.getBatchSelectionIds().size();
     AlertDialog.Builder alert              = new AlertDialog.Builder(getActivity());
-    alert.setIconAttribute(R.attr.dialog_alert_icon);
+    alert.setIcon(R.drawable.ic_warning);
     alert.setTitle(getActivity().getResources().getQuantityString(R.plurals.ConversationListFragment_delete_selected_conversations,
                                                                   conversationsCount, conversationsCount));
     alert.setMessage(getActivity().getResources().getQuantityString(R.plurals.ConversationListFragment_this_will_permanently_delete_all_n_selected_conversations,
@@ -818,33 +830,37 @@ public class ConversationListFragment extends MainFragment implements ActionMode
     getNavigator().goToConversation(recipient.getId(), threadId, distributionType, -1);
   }
 
-  private void onSubmitList(@NonNull ConversationListViewModel.ConversationList conversationList) {
-    if (conversationList.getConversations().isDetached()) {
-      return;
-    }
-
-    defaultAdapter.submitList(conversationList.getConversations());
-
-    onPostSubmitList();
+  private void onSubmitList(@NonNull List<Conversation> conversationList) {
+    defaultAdapter.submitList(conversationList);
+    onPostSubmitList(conversationList.size());
   }
 
-  private void updateEmptyState(boolean isConversationEmpty) {
+  void updateEmptyState(boolean isConversationEmpty) {
     if (isConversationEmpty) {
       Log.i(TAG, "Received an empty data set.");
       list.setVisibility(View.INVISIBLE);
-      emptyState.setVisibility(View.VISIBLE);
-      emptyImage.setImageResource(EMPTY_IMAGES[(int) (Math.random() * EMPTY_IMAGES.length)]);
+      emptyState.get().setVisibility(View.VISIBLE);
       fab.startPulse(3 * 1000);
       cameraFab.startPulse(3 * 1000);
+
+      SignalStore.onboarding().setShowNewGroup(true);
+      SignalStore.onboarding().setShowInviteFriends(true);
     } else {
       list.setVisibility(View.VISIBLE);
-      emptyState.setVisibility(View.GONE);
       fab.stopPulse();
       cameraFab.stopPulse();
+
+      if (emptyState.resolved()) {
+        emptyState.get().setVisibility(View.GONE);
+      }
     }
   }
 
-  protected void onPostSubmitList() {
+  protected void onPostSubmitList(int conversationCount) {
+    if (conversationCount >= 6 && (SignalStore.onboarding().shouldShowInviteFriends() || SignalStore.onboarding().shouldShowNewGroup())) {
+      SignalStore.onboarding().clearAll();
+      ApplicationDependencies.getMegaphoneRepository().markFinished(Megaphones.Event.ONBOARDING);
+    }
   }
 
   @Override
@@ -888,14 +904,7 @@ public class ConversationListFragment extends MainFragment implements ActionMode
 
     mode.setTitle("1");
 
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-      getActivity().getWindow().setStatusBarColor(getResources().getColor(R.color.action_mode_status_bar));
-    }
-
-    if (Build.VERSION.SDK_INT >= 23) {
-      int current = getActivity().getWindow().getDecorView().getSystemUiVisibility();
-      getActivity().getWindow().getDecorView().setSystemUiVisibility(current & ~View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR);
-    }
+    WindowUtil.setStatusBarColor(requireActivity().getWindow(), getResources().getColor(R.color.action_mode_status_bar));
 
     return true;
   }
@@ -927,7 +936,7 @@ public class ConversationListFragment extends MainFragment implements ActionMode
 
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
       TypedArray color = getActivity().getTheme().obtainStyledAttributes(new int[] {android.R.attr.statusBarColor});
-      getActivity().getWindow().setStatusBarColor(color.getColor(0, Color.BLACK));
+      WindowUtil.setStatusBarColor(getActivity().getWindow(), color.getColor(0, Color.BLACK));
       color.recycle();
     }
 
@@ -981,8 +990,8 @@ public class ConversationListFragment extends MainFragment implements ActionMode
     }
   }
 
-  protected @IdRes int getToolbarRes() {
-    return R.id.toolbar;
+  protected Toolbar getToolbar(@NonNull View rootView) {
+    return rootView.findViewById(R.id.toolbar);
   }
 
   protected @PluralsRes int getArchivedSnackbarTitleRes() {
@@ -1017,24 +1026,34 @@ public class ConversationListFragment extends MainFragment implements ActionMode
                                 Snackbar.LENGTH_LONG,
                                 false)
     {
+      private final ThreadDatabase threadDatabase= DatabaseFactory.getThreadDatabase(getActivity());
+
+      private List<Long> pinnedThreadIds;
+
       @Override
       protected void executeAction(@Nullable Long parameter) {
-        DatabaseFactory.getThreadDatabase(getActivity()).archiveConversation(threadId);
+        Context context = requireActivity();
+
+        pinnedThreadIds = threadDatabase.getPinnedThreadIds();
+        threadDatabase.archiveConversation(threadId);
 
         if (unreadCount > 0) {
-          List<MarkedMessageInfo> messageIds = DatabaseFactory.getThreadDatabase(getActivity()).setRead(threadId, false);
-          ApplicationDependencies.getMessageNotifier().updateNotification(getActivity());
-          MarkReadReceiver.process(getActivity(), messageIds);
+          List<MarkedMessageInfo> messageIds = threadDatabase.setRead(threadId, false);
+          ApplicationDependencies.getMessageNotifier().updateNotification(context);
+          MarkReadReceiver.process(context, messageIds);
         }
       }
 
       @Override
       protected void reverseAction(@Nullable Long parameter) {
-        DatabaseFactory.getThreadDatabase(getActivity()).unarchiveConversation(threadId);
+        Context context = requireActivity();
+
+        threadDatabase.unarchiveConversation(threadId);
+        threadDatabase.restorePins(pinnedThreadIds);
 
         if (unreadCount > 0) {
-          DatabaseFactory.getThreadDatabase(getActivity()).incrementUnread(threadId, unreadCount);
-          ApplicationDependencies.getMessageNotifier().updateNotification(getActivity());
+          threadDatabase.incrementUnread(threadId, unreadCount);
+          ApplicationDependencies.getMessageNotifier().updateNotification(context);
         }
       }
     }.executeOnExecutor(AsyncTask.THREAD_POOL_EXECUTOR, threadId);

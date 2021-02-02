@@ -22,6 +22,7 @@ import androidx.annotation.Nullable;
 import androidx.appcompat.widget.Toolbar;
 import androidx.constraintlayout.widget.ConstraintLayout;
 import androidx.constraintlayout.widget.ConstraintSet;
+import androidx.core.content.ContextCompat;
 import androidx.vectordrawable.graphics.drawable.AnimatorInflaterCompat;
 
 import com.annimon.stream.Stream;
@@ -38,6 +39,7 @@ import org.thoughtcrime.securesms.recipients.Recipient;
 import org.thoughtcrime.securesms.util.ThemeUtil;
 import org.thoughtcrime.securesms.util.Util;
 import org.thoughtcrime.securesms.util.ViewUtil;
+import org.thoughtcrime.securesms.util.WindowUtil;
 
 import java.util.Collections;
 import java.util.LinkedList;
@@ -54,7 +56,6 @@ public final class ConversationReactionOverlay extends RelativeLayout {
   private final Boundary horizontalEmojiBoundary = new Boundary();
   private final Boundary verticalScrubBoundary   = new Boundary();
   private final PointF   deadzoneTouchPoint      = new PointF();
-  private final PointF   lastSeenDownPoint       = new PointF();
 
   private Activity      activity;
   private Recipient     conversationRecipient;
@@ -140,14 +141,15 @@ public final class ConversationReactionOverlay extends RelativeLayout {
   }
 
   public void setListVerticalTranslation(float translationY) {
-    maskView.setTargetParentTranslationY(translationY);
+    maskView.setTargetParentTranslationY(translationY - ViewUtil.getStatusBarHeight(maskView));
   }
 
   public void show(@NonNull Activity activity,
                    @NonNull View maskTarget,
                    @NonNull Recipient conversationRecipient,
                    @NonNull MessageRecord messageRecord,
-                   int maskPaddingBottom)
+                   int maskPaddingBottom,
+                   @NonNull PointF lastSeenDownPoint)
   {
 
     if (overlayState != OverlayState.HIDDEN) {
@@ -199,10 +201,10 @@ public final class ConversationReactionOverlay extends RelativeLayout {
     if (Build.VERSION.SDK_INT >= 21) {
       this.activity = activity;
       originalStatusBarColor = activity.getWindow().getStatusBarColor();
-      activity.getWindow().setStatusBarColor(ThemeUtil.getThemedColor(getContext(), R.attr.reactions_overlay_toolbar_background_color));
+      WindowUtil.setStatusBarColor(activity.getWindow(), ContextCompat.getColor(getContext(), R.color.action_mode_status_bar));
 
-      if (!ThemeUtil.isDarkTheme(getContext()) && Build.VERSION.SDK_INT >= 23) {
-        activity.getWindow().getDecorView().setSystemUiVisibility(activity.getWindow().getDecorView().getSystemUiVisibility() | View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR);
+      if (!ThemeUtil.isDarkTheme(getContext())) {
+        WindowUtil.setLightStatusBar(activity.getWindow());
       }
     }
   }
@@ -240,9 +242,9 @@ public final class ConversationReactionOverlay extends RelativeLayout {
     revealAnimatorSet.end();
     hideAnimatorSet.start();
 
-    if (Build.VERSION.SDK_INT >= 23 && activity != null) {
-      activity.getWindow().setStatusBarColor(originalStatusBarColor);
-      activity.getWindow().getDecorView().setSystemUiVisibility(activity.getWindow().getDecorView().getSystemUiVisibility() & ~View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR);
+    if (Build.VERSION.SDK_INT >= 21 && activity != null) {
+      WindowUtil.setStatusBarColor(activity.getWindow(), originalStatusBarColor);
+      WindowUtil.clearLightStatusBar(activity.getWindow());
       activity = null;
     }
 
@@ -290,10 +292,7 @@ public final class ConversationReactionOverlay extends RelativeLayout {
 
   public boolean applyTouchEvent(@NonNull MotionEvent motionEvent) {
     if (!isShowing()) {
-      if (motionEvent.getAction() == MotionEvent.ACTION_DOWN) {
-        lastSeenDownPoint.set(motionEvent.getX(), motionEvent.getY());
-      }
-      return false;
+      throw new IllegalStateException("Touch events should only be propagated to this method if we are displaying the scrubber.");
     }
 
     if ((motionEvent.getAction() & MotionEvent.ACTION_POINTER_INDEX_MASK) != 0) {
@@ -405,7 +404,7 @@ public final class ConversationReactionOverlay extends RelativeLayout {
           view.setImageEmoji(SignalStore.emojiValues().getPreferredVariation(ReactionEmoji.values()[i].emoji));
         }
       } else if (isAtCustomIndex) {
-        view.setImageDrawable(ThemeUtil.getThemedDrawable(getContext(), R.attr.reactions_overlay_custom_emoji_icon));
+        view.setImageDrawable(ContextCompat.getDrawable(getContext(), R.drawable.ic_any_emoji_32));
         view.setTag(null);
       } else {
         view.setImageEmoji(SignalStore.emojiValues().getPreferredVariation(ReactionEmoji.values()[i].emoji));

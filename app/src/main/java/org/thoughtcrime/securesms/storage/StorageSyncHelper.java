@@ -9,16 +9,15 @@ import androidx.annotation.VisibleForTesting;
 import com.annimon.stream.Collectors;
 import com.annimon.stream.Stream;
 
+import org.signal.core.util.logging.Log;
 import org.thoughtcrime.securesms.database.DatabaseFactory;
 import org.thoughtcrime.securesms.database.RecipientDatabase;
 import org.thoughtcrime.securesms.database.RecipientDatabase.RecipientSettings;
-import org.thoughtcrime.securesms.database.ThreadDatabase;
 import org.thoughtcrime.securesms.dependencies.ApplicationDependencies;
 import org.thoughtcrime.securesms.jobs.RetrieveProfileAvatarJob;
 import org.thoughtcrime.securesms.jobs.StorageSyncJob;
 import org.thoughtcrime.securesms.keyvalue.PhoneNumberPrivacyValues;
 import org.thoughtcrime.securesms.keyvalue.SignalStore;
-import org.thoughtcrime.securesms.logging.Log;
 import org.thoughtcrime.securesms.recipients.Recipient;
 import org.thoughtcrime.securesms.recipients.RecipientId;
 import org.thoughtcrime.securesms.util.Base64;
@@ -35,7 +34,6 @@ import org.whispersystems.signalservice.api.storage.SignalStorageManifest;
 import org.whispersystems.signalservice.api.storage.SignalStorageRecord;
 import org.whispersystems.signalservice.api.storage.StorageId;
 import org.whispersystems.signalservice.api.util.OptionalUtil;
-import org.whispersystems.signalservice.internal.storage.protos.AccountRecord;
 import org.whispersystems.signalservice.internal.storage.protos.ManifestRecord;
 
 import java.nio.ByteBuffer;
@@ -44,7 +42,6 @@ import java.util.Collection;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
-import java.util.LinkedList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -254,7 +251,8 @@ public final class StorageSyncHelper {
    * @return A set of actions that should be applied to resolve the conflict.
    */
   public static @NonNull MergeResult resolveConflict(@NonNull Collection<SignalStorageRecord> remoteOnlyRecords,
-                                                     @NonNull Collection<SignalStorageRecord> localOnlyRecords)
+                                                     @NonNull Collection<SignalStorageRecord> localOnlyRecords,
+                                                     @NonNull GroupV2ExistenceChecker groupExistenceChecker)
   {
     List<SignalContactRecord> remoteOnlyContacts = Stream.of(remoteOnlyRecords).filter(r -> r.getContact().isPresent()).map(r -> r.getContact().get()).toList();
     List<SignalContactRecord> localOnlyContacts  = Stream.of(localOnlyRecords).filter(r -> r.getContact().isPresent()).map(r -> r.getContact().get()).toList();
@@ -278,7 +276,7 @@ public final class StorageSyncHelper {
     }
 
     RecordMergeResult<SignalContactRecord> contactMergeResult = resolveRecordConflict(remoteOnlyContacts, localOnlyContacts, new ContactConflictMerger(localOnlyContacts, Recipient.self()));
-    RecordMergeResult<SignalGroupV1Record> groupV1MergeResult = resolveRecordConflict(remoteOnlyGroupV1, localOnlyGroupV1, new GroupV1ConflictMerger(localOnlyGroupV1));
+    RecordMergeResult<SignalGroupV1Record> groupV1MergeResult = resolveRecordConflict(remoteOnlyGroupV1, localOnlyGroupV1, new GroupV1ConflictMerger(localOnlyGroupV1, groupExistenceChecker));
     RecordMergeResult<SignalGroupV2Record> groupV2MergeResult = resolveRecordConflict(remoteOnlyGroupV2, localOnlyGroupV2, new GroupV2ConflictMerger(localOnlyGroupV2));
     RecordMergeResult<SignalAccountRecord> accountMergeResult = resolveRecordConflict(remoteOnlyAccount, localOnlyAccount, new AccountConflictMerger(localOnlyAccount.isEmpty() ? Optional.absent() : Optional.of(localOnlyAccount.get(0))));
 
@@ -412,7 +410,11 @@ public final class StorageSyncHelper {
   }
 
   public static SignalStorageRecord buildAccountRecord(@NonNull Context context, @NonNull Recipient self) {
-    RecipientSettings settings = DatabaseFactory.getRecipientDatabase(context).getRecipientSettingsForSync(self.getId());
+    RecipientDatabase       recipientDatabase = DatabaseFactory.getRecipientDatabase(context);
+    RecipientSettings       settings          = recipientDatabase.getRecipientSettingsForSync(self.getId());
+    List<RecipientSettings> pinned            = Stream.of(DatabaseFactory.getThreadDatabase(context).getPinnedRecipientIds())
+                                                      .map(recipientDatabase::getRecipientSettingsForSync)
+                                                      .toList();
 
     SignalAccountRecord account = new SignalAccountRecord.Builder(self.getStorageServiceId())
                                                          .setUnknownFields(settings != null ? settings.getSyncExtras().getStorageProto() : null)
@@ -427,28 +429,12 @@ public final class StorageSyncHelper {
                                                          .setSealedSenderIndicatorsEnabled(TextSecurePreferences.isShowUnidentifiedDeliveryIndicatorsEnabled(context))
                                                          .setLinkPreviewsEnabled(SignalStore.settings().isLinkPreviewsEnabled())
                                                          .setUnlistedPhoneNumber(SignalStore.phoneNumberPrivacy().getPhoneNumberListingMode().isUnlisted())
-                                                         .setPhoneNumberSharingMode(localToRemotePhoneNumberSharingMode(SignalStore.phoneNumberPrivacy().getPhoneNumberSharingMode()))
+                                                         .setPhoneNumberSharingMode(StorageSyncModels.localToRemotePhoneNumberSharingMode(SignalStore.phoneNumberPrivacy().getPhoneNumberSharingMode()))
+                                                         .setPinnedConversations(StorageSyncModels.localToRemotePinnedConversations(pinned))
+                                                         .setPreferContactAvatars(SignalStore.settings().isPreferSystemContactPhotos())
                                                          .build();
 
     return SignalStorageRecord.forAccount(account);
-  }
-
-  private static AccountRecord.PhoneNumberSharingMode localToRemotePhoneNumberSharingMode(PhoneNumberPrivacyValues.PhoneNumberSharingMode phoneNumberPhoneNumberSharingMode) {
-    switch (phoneNumberPhoneNumberSharingMode) {
-      case EVERYONE: return AccountRecord.PhoneNumberSharingMode.EVERYBODY;
-      case CONTACTS: return AccountRecord.PhoneNumberSharingMode.CONTACTS_ONLY;
-      case NOBODY  : return AccountRecord.PhoneNumberSharingMode.NOBODY;
-      default      : throw new AssertionError();
-    }
-  }
-
-  private static PhoneNumberPrivacyValues.PhoneNumberSharingMode remoteToLocalPhoneNumberSharingMode(AccountRecord.PhoneNumberSharingMode phoneNumberPhoneNumberSharingMode) {
-    switch (phoneNumberPhoneNumberSharingMode) {
-      case EVERYBODY    : return PhoneNumberPrivacyValues.PhoneNumberSharingMode.EVERYONE;
-      case CONTACTS_ONLY: return PhoneNumberPrivacyValues.PhoneNumberSharingMode.CONTACTS;
-      case NOBODY       : return PhoneNumberPrivacyValues.PhoneNumberSharingMode.NOBODY;
-      default           : return PhoneNumberPrivacyValues.PhoneNumberSharingMode.CONTACTS;
-    }
   }
 
   public static void applyAccountStorageSyncUpdates(@NonNull Context context, Optional<StorageSyncHelper.RecordUpdate<SignalAccountRecord>> update) {
@@ -466,7 +452,8 @@ public final class StorageSyncHelper {
     TextSecurePreferences.setShowUnidentifiedDeliveryIndicatorsEnabled(context, update.isSealedSenderIndicatorsEnabled());
     SignalStore.settings().setLinkPreviewsEnabled(update.isLinkPreviewsEnabled());
     SignalStore.phoneNumberPrivacy().setPhoneNumberListingMode(update.isPhoneNumberUnlisted() ? PhoneNumberPrivacyValues.PhoneNumberListingMode.UNLISTED : PhoneNumberPrivacyValues.PhoneNumberListingMode.LISTED);
-    SignalStore.phoneNumberPrivacy().setPhoneNumberSharingMode(remoteToLocalPhoneNumberSharingMode(update.getPhoneNumberSharingMode()));
+    SignalStore.phoneNumberPrivacy().setPhoneNumberSharingMode(StorageSyncModels.remoteToLocalPhoneNumberSharingMode(update.getPhoneNumberSharingMode()));
+    SignalStore.settings().setPreferSystemContactPhotos(update.isPreferContactAvatars());
 
     if (fetchProfile && update.getAvatarUrlPath().isPresent()) {
       ApplicationDependencies.getJobManager().add(new RetrieveProfileAvatarJob(Recipient.self(), update.getAvatarUrlPath().get()));

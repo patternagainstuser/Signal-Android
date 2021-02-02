@@ -10,11 +10,15 @@ import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 
 import com.annimon.stream.Stream;
+import com.google.protobuf.ByteString;
+import com.google.protobuf.InvalidProtocolBufferException;
 
+import net.sqlcipher.SQLException;
 import net.sqlcipher.database.SQLiteConstraintException;
-import net.sqlcipher.database.SQLiteDatabase;
 
+import org.signal.core.util.logging.Log;
 import org.signal.storageservice.protos.groups.local.DecryptedGroup;
+import org.signal.zkgroup.InvalidInputException;
 import org.signal.zkgroup.groups.GroupMasterKey;
 import org.signal.zkgroup.profiles.ProfileKey;
 import org.signal.zkgroup.profiles.ProfileKeyCredential;
@@ -25,13 +29,17 @@ import org.thoughtcrime.securesms.database.IdentityDatabase.IdentityRecord;
 import org.thoughtcrime.securesms.database.IdentityDatabase.VerifiedStatus;
 import org.thoughtcrime.securesms.database.helpers.SQLCipherOpenHelper;
 import org.thoughtcrime.securesms.database.model.ThreadRecord;
+import org.thoughtcrime.securesms.database.model.databaseprotos.DeviceLastResetTime;
+import org.thoughtcrime.securesms.database.model.databaseprotos.ProfileKeyCredentialColumnData;
+import org.thoughtcrime.securesms.database.model.databaseprotos.Wallpaper;
 import org.thoughtcrime.securesms.dependencies.ApplicationDependencies;
 import org.thoughtcrime.securesms.groups.GroupId;
 import org.thoughtcrime.securesms.groups.v2.ProfileKeySet;
 import org.thoughtcrime.securesms.groups.v2.processing.GroupsV2StateProcessor;
 import org.thoughtcrime.securesms.jobs.RefreshAttributesJob;
 import org.thoughtcrime.securesms.jobs.RequestGroupV2InfoJob;
-import org.thoughtcrime.securesms.logging.Log;
+import org.thoughtcrime.securesms.jobs.RetrieveProfileJob;
+import org.thoughtcrime.securesms.mms.PartAuthority;
 import org.thoughtcrime.securesms.profiles.AvatarHelper;
 import org.thoughtcrime.securesms.profiles.ProfileName;
 import org.thoughtcrime.securesms.recipients.Recipient;
@@ -40,12 +48,16 @@ import org.thoughtcrime.securesms.storage.StorageSyncHelper;
 import org.thoughtcrime.securesms.storage.StorageSyncHelper.RecordUpdate;
 import org.thoughtcrime.securesms.storage.StorageSyncModels;
 import org.thoughtcrime.securesms.util.Base64;
+import org.thoughtcrime.securesms.util.Bitmask;
 import org.thoughtcrime.securesms.util.CursorUtil;
 import org.thoughtcrime.securesms.util.GroupUtil;
 import org.thoughtcrime.securesms.util.IdentityUtil;
 import org.thoughtcrime.securesms.util.SqlUtil;
 import org.thoughtcrime.securesms.util.StringUtil;
 import org.thoughtcrime.securesms.util.Util;
+import org.thoughtcrime.securesms.wallpaper.ChatWallpaper;
+import org.thoughtcrime.securesms.wallpaper.ChatWallpaperFactory;
+import org.thoughtcrime.securesms.wallpaper.WallpaperStorage;
 import org.whispersystems.libsignal.IdentityKey;
 import org.whispersystems.libsignal.InvalidKeyException;
 import org.whispersystems.libsignal.util.Pair;
@@ -81,53 +93,65 @@ public class RecipientDatabase extends Database {
 
   private static final String TAG = RecipientDatabase.class.getSimpleName();
 
-          static final String TABLE_NAME               = "recipient";
-  public  static final String ID                       = "_id";
-  private static final String UUID                     = "uuid";
-  private static final String USERNAME                 = "username";
-  public  static final String PHONE                    = "phone";
-  public  static final String EMAIL                    = "email";
-          static final String GROUP_ID                 = "group_id";
-  private static final String GROUP_TYPE               = "group_type";
-  private static final String BLOCKED                  = "blocked";
-  private static final String MESSAGE_RINGTONE         = "message_ringtone";
-  private static final String MESSAGE_VIBRATE          = "message_vibrate";
-  private static final String CALL_RINGTONE            = "call_ringtone";
-  private static final String CALL_VIBRATE             = "call_vibrate";
-  private static final String NOTIFICATION_CHANNEL     = "notification_channel";
-  private static final String MUTE_UNTIL               = "mute_until";
-  private static final String COLOR                    = "color";
-  private static final String SEEN_INVITE_REMINDER     = "seen_invite_reminder";
-  private static final String DEFAULT_SUBSCRIPTION_ID  = "default_subscription_id";
-  private static final String MESSAGE_EXPIRATION_TIME  = "message_expiration_time";
-  public  static final String REGISTERED               = "registered";
-  public  static final String SYSTEM_DISPLAY_NAME      = "system_display_name";
-  private static final String SYSTEM_PHOTO_URI         = "system_photo_uri";
-  public  static final String SYSTEM_PHONE_TYPE        = "system_phone_type";
-  public  static final String SYSTEM_PHONE_LABEL       = "system_phone_label";
-  private static final String SYSTEM_CONTACT_URI       = "system_contact_uri";
-  private static final String SYSTEM_INFO_PENDING      = "system_info_pending";
-  private static final String PROFILE_KEY              = "profile_key";
-  private static final String PROFILE_KEY_CREDENTIAL   = "profile_key_credential";
-  private static final String SIGNAL_PROFILE_AVATAR    = "signal_profile_avatar";
-  private static final String PROFILE_SHARING          = "profile_sharing";
-  private static final String LAST_PROFILE_FETCH       = "last_profile_fetch";
-  private static final String UNIDENTIFIED_ACCESS_MODE = "unidentified_access_mode";
-  private static final String FORCE_SMS_SELECTION      = "force_sms_selection";
-  private static final String UUID_CAPABILITY          = "uuid_supported";
-  private static final String GROUPS_V2_CAPABILITY     = "gv2_capability";
-  private static final String STORAGE_SERVICE_ID       = "storage_service_key";
-  private static final String DIRTY                    = "dirty";
-  private static final String PROFILE_GIVEN_NAME       = "signal_profile_name";
-  private static final String PROFILE_FAMILY_NAME      = "profile_family_name";
-  private static final String PROFILE_JOINED_NAME      = "profile_joined_name";
-  private static final String MENTION_SETTING          = "mention_setting";
-  private static final String STORAGE_PROTO            = "storage_proto";
+          static final String TABLE_NAME                = "recipient";
+  public  static final String ID                        = "_id";
+  private static final String UUID                      = "uuid";
+  private static final String USERNAME                  = "username";
+  public  static final String PHONE                     = "phone";
+  public  static final String EMAIL                     = "email";
+          static final String GROUP_ID                  = "group_id";
+          static final String GROUP_TYPE                = "group_type";
+  private static final String BLOCKED                   = "blocked";
+  private static final String MESSAGE_RINGTONE          = "message_ringtone";
+  private static final String MESSAGE_VIBRATE           = "message_vibrate";
+  private static final String CALL_RINGTONE             = "call_ringtone";
+  private static final String CALL_VIBRATE              = "call_vibrate";
+  private static final String NOTIFICATION_CHANNEL      = "notification_channel";
+  private static final String MUTE_UNTIL                = "mute_until";
+  private static final String COLOR                     = "color";
+  private static final String SEEN_INVITE_REMINDER      = "seen_invite_reminder";
+  private static final String DEFAULT_SUBSCRIPTION_ID   = "default_subscription_id";
+  private static final String MESSAGE_EXPIRATION_TIME   = "message_expiration_time";
+  public  static final String REGISTERED                = "registered";
+  public  static final String SYSTEM_DISPLAY_NAME       = "system_display_name";
+  private static final String SYSTEM_PHOTO_URI          = "system_photo_uri";
+  public  static final String SYSTEM_PHONE_TYPE         = "system_phone_type";
+  public  static final String SYSTEM_PHONE_LABEL        = "system_phone_label";
+  private static final String SYSTEM_CONTACT_URI        = "system_contact_uri";
+  private static final String SYSTEM_INFO_PENDING       = "system_info_pending";
+  private static final String PROFILE_KEY               = "profile_key";
+  private static final String PROFILE_KEY_CREDENTIAL    = "profile_key_credential";
+  private static final String SIGNAL_PROFILE_AVATAR     = "signal_profile_avatar";
+  private static final String PROFILE_SHARING           = "profile_sharing";
+  private static final String LAST_PROFILE_FETCH        = "last_profile_fetch";
+  private static final String UNIDENTIFIED_ACCESS_MODE  = "unidentified_access_mode";
+          static final String FORCE_SMS_SELECTION       = "force_sms_selection";
+  private static final String CAPABILITIES              = "capabilities";
+  private static final String STORAGE_SERVICE_ID        = "storage_service_key";
+  private static final String DIRTY                     = "dirty";
+  private static final String PROFILE_GIVEN_NAME        = "signal_profile_name";
+  private static final String PROFILE_FAMILY_NAME       = "profile_family_name";
+  private static final String PROFILE_JOINED_NAME       = "profile_joined_name";
+  private static final String MENTION_SETTING           = "mention_setting";
+  private static final String STORAGE_PROTO             = "storage_proto";
+  private static final String LAST_GV1_MIGRATE_REMINDER = "last_gv1_migrate_reminder";
+  private static final String LAST_SESSION_RESET        = "last_session_reset";
+  private static final String WALLPAPER                 = "wallpaper";
+  private static final String WALLPAPER_URI             = "wallpaper_file";
+  public  static final String ABOUT                     = "about";
+  public  static final String ABOUT_EMOJI               = "about_emoji";
 
   public  static final String SEARCH_PROFILE_NAME      = "search_signal_profile";
   private static final String SORT_NAME                = "sort_name";
   private static final String IDENTITY_STATUS          = "identity_status";
   private static final String IDENTITY_KEY             = "identity_key";
+
+  private static final class Capabilities {
+    static final int BIT_LENGTH = 2;
+
+    static final int GROUPS_V2           = 0;
+    static final int GROUPS_V1_MIGRATION = 1;
+  }
 
   private static final String[] RECIPIENT_PROJECTION = new String[] {
       ID, UUID, USERNAME, PHONE, EMAIL, GROUP_ID, GROUP_TYPE,
@@ -138,14 +162,16 @@ public class RecipientDatabase extends Database {
       NOTIFICATION_CHANNEL,
       UNIDENTIFIED_ACCESS_MODE,
       FORCE_SMS_SELECTION,
-      UUID_CAPABILITY, GROUPS_V2_CAPABILITY,
+      CAPABILITIES,
       STORAGE_SERVICE_ID, DIRTY,
-      MENTION_SETTING
+      MENTION_SETTING, WALLPAPER, WALLPAPER_URI,
+      MENTION_SETTING,
+      ABOUT, ABOUT_EMOJI
   };
 
   private static final String[] ID_PROJECTION              = new String[]{ID};
-  private static final String[] SEARCH_PROJECTION          = new String[]{ID, SYSTEM_DISPLAY_NAME, PHONE, EMAIL, SYSTEM_PHONE_LABEL, SYSTEM_PHONE_TYPE, REGISTERED, "COALESCE(" + nullIfEmpty(PROFILE_JOINED_NAME) + ", " + nullIfEmpty(PROFILE_GIVEN_NAME) + ") AS " + SEARCH_PROFILE_NAME, "COALESCE(" + nullIfEmpty(SYSTEM_DISPLAY_NAME) + ", " + nullIfEmpty(PROFILE_JOINED_NAME) + ", " + nullIfEmpty(PROFILE_GIVEN_NAME) + ", " + nullIfEmpty(USERNAME) + ") AS " + SORT_NAME};
-  public  static final String[] SEARCH_PROJECTION_NAMES    = new String[]{ID, SYSTEM_DISPLAY_NAME, PHONE, EMAIL, SYSTEM_PHONE_LABEL, SYSTEM_PHONE_TYPE, REGISTERED, SEARCH_PROFILE_NAME, SORT_NAME};
+  private static final String[] SEARCH_PROJECTION          = new String[]{ID, SYSTEM_DISPLAY_NAME, PHONE, EMAIL, SYSTEM_PHONE_LABEL, SYSTEM_PHONE_TYPE, REGISTERED, ABOUT, ABOUT_EMOJI, "COALESCE(" + nullIfEmpty(PROFILE_JOINED_NAME) + ", " + nullIfEmpty(PROFILE_GIVEN_NAME) + ") AS " + SEARCH_PROFILE_NAME, "COALESCE(" + nullIfEmpty(SYSTEM_DISPLAY_NAME) + ", " + nullIfEmpty(PROFILE_JOINED_NAME) + ", " + nullIfEmpty(PROFILE_GIVEN_NAME) + ", " + nullIfEmpty(USERNAME) + ") AS " + SORT_NAME};
+  public  static final String[] SEARCH_PROJECTION_NAMES    = new String[]{ID, SYSTEM_DISPLAY_NAME, PHONE, EMAIL, SYSTEM_PHONE_LABEL, SYSTEM_PHONE_TYPE, REGISTERED, ABOUT, ABOUT_EMOJI, SEARCH_PROFILE_NAME, SORT_NAME};
   private static final String[] TYPED_RECIPIENT_PROJECTION = Stream.of(RECIPIENT_PROJECTION)
                                                                    .map(columnName -> TABLE_NAME + "." + columnName)
                                                                    .toList().toArray(new String[0]);
@@ -294,47 +320,52 @@ public class RecipientDatabase extends Database {
   }
 
   public static final String CREATE_TABLE =
-      "CREATE TABLE " + TABLE_NAME + " (" + ID                       + " INTEGER PRIMARY KEY AUTOINCREMENT, " +
-                                            UUID                     + " TEXT UNIQUE DEFAULT NULL, " +
-                                            USERNAME                 + " TEXT UNIQUE DEFAULT NULL, " +
-                                            PHONE                    + " TEXT UNIQUE DEFAULT NULL, " +
-                                            EMAIL                    + " TEXT UNIQUE DEFAULT NULL, " +
-                                            GROUP_ID                 + " TEXT UNIQUE DEFAULT NULL, " +
-                                            GROUP_TYPE               + " INTEGER DEFAULT " + GroupType.NONE.getId() +  ", " +
-                                            BLOCKED                  + " INTEGER DEFAULT 0," +
-                                            MESSAGE_RINGTONE         + " TEXT DEFAULT NULL, " +
-                                            MESSAGE_VIBRATE          + " INTEGER DEFAULT " + VibrateState.DEFAULT.getId() + ", " +
-                                            CALL_RINGTONE            + " TEXT DEFAULT NULL, " +
-                                            CALL_VIBRATE             + " INTEGER DEFAULT " + VibrateState.DEFAULT.getId() + ", " +
-                                            NOTIFICATION_CHANNEL     + " TEXT DEFAULT NULL, " +
-                                            MUTE_UNTIL               + " INTEGER DEFAULT 0, " +
-                                            COLOR                    + " TEXT DEFAULT NULL, " +
-                                            SEEN_INVITE_REMINDER     + " INTEGER DEFAULT " + InsightsBannerTier.NO_TIER.getId() + ", " +
-                                            DEFAULT_SUBSCRIPTION_ID  + " INTEGER DEFAULT -1, " +
-                                            MESSAGE_EXPIRATION_TIME  + " INTEGER DEFAULT 0, " +
-                                            REGISTERED               + " INTEGER DEFAULT " + RegisteredState.UNKNOWN.getId() + ", " +
-                                            SYSTEM_DISPLAY_NAME      + " TEXT DEFAULT NULL, " +
-                                            SYSTEM_PHOTO_URI         + " TEXT DEFAULT NULL, " +
-                                            SYSTEM_PHONE_LABEL       + " TEXT DEFAULT NULL, " +
-                                            SYSTEM_PHONE_TYPE        + " INTEGER DEFAULT -1, " +
-                                            SYSTEM_CONTACT_URI       + " TEXT DEFAULT NULL, " +
-                                            SYSTEM_INFO_PENDING      + " INTEGER DEFAULT 0, " +
-                                            PROFILE_KEY              + " TEXT DEFAULT NULL, " +
-                                            PROFILE_KEY_CREDENTIAL   + " TEXT DEFAULT NULL, " +
-                                            PROFILE_GIVEN_NAME       + " TEXT DEFAULT NULL, " +
-                                            PROFILE_FAMILY_NAME      + " TEXT DEFAULT NULL, " +
-                                            PROFILE_JOINED_NAME      + " TEXT DEFAULT NULL, " +
-                                            SIGNAL_PROFILE_AVATAR    + " TEXT DEFAULT NULL, " +
-                                            PROFILE_SHARING          + " INTEGER DEFAULT 0, " +
-                                            LAST_PROFILE_FETCH       + " INTEGER DEFAULT 0, " +
-                                            UNIDENTIFIED_ACCESS_MODE + " INTEGER DEFAULT 0, " +
-                                            FORCE_SMS_SELECTION      + " INTEGER DEFAULT 0, " +
-                                            UUID_CAPABILITY          + " INTEGER DEFAULT " + Recipient.Capability.UNKNOWN.serialize() + ", " +
-                                            GROUPS_V2_CAPABILITY     + " INTEGER DEFAULT " + Recipient.Capability.UNKNOWN.serialize() + ", " +
-                                            STORAGE_SERVICE_ID       + " TEXT UNIQUE DEFAULT NULL, " +
-                                            DIRTY                    + " INTEGER DEFAULT " + DirtyState.CLEAN.getId() + ", " +
-                                            MENTION_SETTING          + " INTEGER DEFAULT " + MentionSetting.ALWAYS_NOTIFY.getId() + ", " +
-                                            STORAGE_PROTO            + " TEXT DEFAULT NULL);";
+      "CREATE TABLE " + TABLE_NAME + " (" + ID                        + " INTEGER PRIMARY KEY AUTOINCREMENT, " +
+                                            UUID                      + " TEXT UNIQUE DEFAULT NULL, " +
+                                            USERNAME                  + " TEXT UNIQUE DEFAULT NULL, " +
+                                            PHONE                     + " TEXT UNIQUE DEFAULT NULL, " +
+                                            EMAIL                     + " TEXT UNIQUE DEFAULT NULL, " +
+                                            GROUP_ID                  + " TEXT UNIQUE DEFAULT NULL, " +
+                                            GROUP_TYPE                + " INTEGER DEFAULT " + GroupType.NONE.getId() +  ", " +
+                                            BLOCKED                   + " INTEGER DEFAULT 0," +
+                                            MESSAGE_RINGTONE          + " TEXT DEFAULT NULL, " +
+                                            MESSAGE_VIBRATE           + " INTEGER DEFAULT " + VibrateState.DEFAULT.getId() + ", " +
+                                            CALL_RINGTONE             + " TEXT DEFAULT NULL, " +
+                                            CALL_VIBRATE              + " INTEGER DEFAULT " + VibrateState.DEFAULT.getId() + ", " +
+                                            NOTIFICATION_CHANNEL      + " TEXT DEFAULT NULL, " +
+                                            MUTE_UNTIL                + " INTEGER DEFAULT 0, " +
+                                            COLOR                     + " TEXT DEFAULT NULL, " +
+                                            SEEN_INVITE_REMINDER      + " INTEGER DEFAULT " + InsightsBannerTier.NO_TIER.getId() + ", " +
+                                            DEFAULT_SUBSCRIPTION_ID   + " INTEGER DEFAULT -1, " +
+                                            MESSAGE_EXPIRATION_TIME   + " INTEGER DEFAULT 0, " +
+                                            REGISTERED                + " INTEGER DEFAULT " + RegisteredState.UNKNOWN.getId() + ", " +
+                                            SYSTEM_DISPLAY_NAME       + " TEXT DEFAULT NULL, " +
+                                            SYSTEM_PHOTO_URI          + " TEXT DEFAULT NULL, " +
+                                            SYSTEM_PHONE_LABEL        + " TEXT DEFAULT NULL, " +
+                                            SYSTEM_PHONE_TYPE         + " INTEGER DEFAULT -1, " +
+                                            SYSTEM_CONTACT_URI        + " TEXT DEFAULT NULL, " +
+                                            SYSTEM_INFO_PENDING       + " INTEGER DEFAULT 0, " +
+                                            PROFILE_KEY               + " TEXT DEFAULT NULL, " +
+                                            PROFILE_KEY_CREDENTIAL    + " TEXT DEFAULT NULL, " +
+                                            PROFILE_GIVEN_NAME        + " TEXT DEFAULT NULL, " +
+                                            PROFILE_FAMILY_NAME       + " TEXT DEFAULT NULL, " +
+                                            PROFILE_JOINED_NAME       + " TEXT DEFAULT NULL, " +
+                                            SIGNAL_PROFILE_AVATAR     + " TEXT DEFAULT NULL, " +
+                                            PROFILE_SHARING           + " INTEGER DEFAULT 0, " +
+                                            LAST_PROFILE_FETCH        + " INTEGER DEFAULT 0, " +
+                                            UNIDENTIFIED_ACCESS_MODE  + " INTEGER DEFAULT 0, " +
+                                            FORCE_SMS_SELECTION       + " INTEGER DEFAULT 0, " +
+                                            STORAGE_SERVICE_ID        + " TEXT UNIQUE DEFAULT NULL, " +
+                                            DIRTY                     + " INTEGER DEFAULT " + DirtyState.CLEAN.getId() + ", " +
+                                            MENTION_SETTING           + " INTEGER DEFAULT " + MentionSetting.ALWAYS_NOTIFY.getId() + ", " +
+                                            STORAGE_PROTO             + " TEXT DEFAULT NULL, " +
+                                            CAPABILITIES              + " INTEGER DEFAULT 0, " +
+                                            LAST_GV1_MIGRATE_REMINDER + " INTEGER DEFAULT 0, " +
+                                            LAST_SESSION_RESET        + " BLOB DEFAULT NULL, " +
+                                            WALLPAPER                 + " BLOB DEFAULT NULL, " +
+                                            WALLPAPER_URI             + " TEXT DEFAULT NULL, " +
+                                            ABOUT                     + " TEXT DEFAULT NULL, " +
+                                            ABOUT_EMOJI               + " TEXT DEFAULT NULL);";
 
   private static final String INSIGHTS_INVITEE_LIST = "SELECT " + TABLE_NAME + "." + ID +
       " FROM " + TABLE_NAME +
@@ -370,8 +401,8 @@ public class RecipientDatabase extends Database {
     return getByColumn(EMAIL, email);
   }
 
-  public @NonNull Optional<RecipientId> getByGroupId(@NonNull String groupId) {
-    return getByColumn(GROUP_ID, groupId);
+  public @NonNull Optional<RecipientId> getByGroupId(@NonNull GroupId groupId) {
+    return getByColumn(GROUP_ID, groupId.toString());
 
   }
 
@@ -503,6 +534,7 @@ public class RecipientDatabase extends Database {
       if (transactionSuccessful) {
         if (recipientNeedingRefresh != null) {
           Recipient.live(recipientNeedingRefresh).refresh();
+          RetrieveProfileJob.enqueue(recipientNeedingRefresh);
         }
 
         if (remapped != null) {
@@ -546,27 +578,94 @@ public class RecipientDatabase extends Database {
   }
 
   public @NonNull RecipientId getOrInsertFromGroupId(@NonNull GroupId groupId) {
-    GetOrInsertResult result = getOrInsertByColumn(GROUP_ID, groupId.toString());
+    Optional<RecipientId> existing = getByGroupId(groupId);
 
-    if (result.neededInsert) {
+    if (existing.isPresent()) {
+      return existing.get();
+    } else if (groupId.isV1() && DatabaseFactory.getGroupDatabase(context).groupExists(groupId.requireV1().deriveV2MigrationGroupId())) {
+      throw new GroupDatabase.LegacyGroupInsertException(groupId);
+    } else if (groupId.isV2() && DatabaseFactory.getGroupDatabase(context).getGroupV1ByExpectedV2(groupId.requireV2()).isPresent()) {
+      throw new GroupDatabase.MissedGroupMigrationInsertException(groupId);
+    } else {
       ContentValues values = new ContentValues();
+      values.put(GROUP_ID, groupId.toString());
 
-      if (groupId.isMms()) {
-        values.put(GROUP_TYPE, GroupType.MMS.getId());
-      } else {
-        if (groupId.isV2()) {
-          values.put(GROUP_TYPE, GroupType.SIGNAL_V2.getId());
+      long id = databaseHelper.getWritableDatabase().insert(TABLE_NAME, null, values);
+
+      if (id < 0) {
+        existing = getByColumn(GROUP_ID, groupId.toString());
+
+        if (existing.isPresent()) {
+          return existing.get();
+        } else if (groupId.isV1() && DatabaseFactory.getGroupDatabase(context).groupExists(groupId.requireV1().deriveV2MigrationGroupId())) {
+          throw new GroupDatabase.LegacyGroupInsertException(groupId);
+        } else if (groupId.isV2() && DatabaseFactory.getGroupDatabase(context).getGroupV1ByExpectedV2(groupId.requireV2()).isPresent()) {
+          throw new GroupDatabase.MissedGroupMigrationInsertException(groupId);
         } else {
-          values.put(GROUP_TYPE, GroupType.SIGNAL_V1.getId());
+          throw new AssertionError("Failed to insert recipient!");
         }
-        values.put(DIRTY, DirtyState.INSERT.getId());
-        values.put(STORAGE_SERVICE_ID, Base64.encodeBytes(StorageSyncHelper.generateKey()));
+      } else {
+        ContentValues groupUpdates = new ContentValues();
+
+        if (groupId.isMms()) {
+          groupUpdates.put(GROUP_TYPE, GroupType.MMS.getId());
+        } else {
+          if (groupId.isV2()) {
+            groupUpdates.put(GROUP_TYPE, GroupType.SIGNAL_V2.getId());
+          } else {
+            groupUpdates.put(GROUP_TYPE, GroupType.SIGNAL_V1.getId());
+          }
+          groupUpdates.put(DIRTY, DirtyState.INSERT.getId());
+          groupUpdates.put(STORAGE_SERVICE_ID, Base64.encodeBytes(StorageSyncHelper.generateKey()));
+        }
+
+        RecipientId recipientId = RecipientId.from(id);
+
+        update(recipientId, groupUpdates);
+
+        return recipientId;
+      }
+    }
+  }
+
+  /**
+   * See {@link Recipient#externalPossiblyMigratedGroup(Context, GroupId)}.
+   */
+  public @NonNull RecipientId getOrInsertFromPossiblyMigratedGroupId(@NonNull GroupId groupId) {
+    SQLiteDatabase db = databaseHelper.getWritableDatabase();
+
+    db.beginTransaction();
+    try {
+      Optional<RecipientId> existing = getByColumn(GROUP_ID, groupId.toString());
+
+      if (existing.isPresent()) {
+        db.setTransactionSuccessful();
+        return existing.get();
       }
 
-      update(result.recipientId, values);
-    }
+      if (groupId.isV1()) {
+        Optional<RecipientId> v2 = getByGroupId(groupId.requireV1().deriveV2MigrationGroupId());
+        if (v2.isPresent()) {
+          db.setTransactionSuccessful();
+          return v2.get();
+        }
+      }
 
-    return result.recipientId;
+      if (groupId.isV2()) {
+        Optional<GroupDatabase.GroupRecord> v1 = DatabaseFactory.getGroupDatabase(context).getGroupV1ByExpectedV2(groupId.requireV2());
+        if (v1.isPresent()) {
+          db.setTransactionSuccessful();
+          return v1.get().getRecipientId();
+        }
+      }
+
+      RecipientId id = getOrInsertFromGroupId(groupId);
+
+      db.setTransactionSuccessful();
+      return id;
+    } finally {
+      db.endTransaction();
+    }
   }
 
   public Cursor getBlocked() {
@@ -842,7 +941,7 @@ public class RecipientDatabase extends Database {
       for (SignalGroupV1Record insert : groupV1Inserts) {
         db.insertOrThrow(TABLE_NAME, null, getValuesForStorageGroupV1(insert));
 
-        Recipient recipient = Recipient.externalGroup(context, GroupId.v1orThrow(insert.getGroupId()));
+        Recipient recipient = Recipient.externalGroupExact(context, GroupId.v1orThrow(insert.getGroupId()));
 
         threadDatabase.applyStorageSyncUpdate(recipient.getId(), insert);
         needsRefresh.add(recipient.getId());
@@ -856,7 +955,7 @@ public class RecipientDatabase extends Database {
           throw new AssertionError("Had an update, but it didn't match any rows!");
         }
 
-        Recipient recipient = Recipient.externalGroup(context, GroupId.v1orThrow(update.getOld().getGroupId()));
+        Recipient recipient = Recipient.externalGroupExact(context, GroupId.v1orThrow(update.getOld().getGroupId()));
 
         threadDatabase.applyStorageSyncUpdate(recipient.getId(), update.getNew());
         needsRefresh.add(recipient.getId());
@@ -867,7 +966,7 @@ public class RecipientDatabase extends Database {
         GroupId.V2     groupId   = GroupId.v2(masterKey);
         ContentValues  values    = getValuesForStorageGroupV2(insert);
         long           id        = db.insertWithOnConflict(TABLE_NAME, null, values, SQLiteDatabase.CONFLICT_IGNORE);
-        Recipient      recipient = Recipient.externalGroup(context, groupId);
+        Recipient      recipient = Recipient.externalGroupExact(context, groupId);
 
         if (id < 0) {
           Log.w(TAG, String.format("Recipient %s is already linked to group %s", recipient.getId(), groupId));
@@ -899,7 +998,7 @@ public class RecipientDatabase extends Database {
         }
 
         GroupMasterKey masterKey = update.getOld().getMasterKeyOrThrow();
-        Recipient      recipient = Recipient.externalGroup(context, GroupId.v2(masterKey));
+        Recipient      recipient = Recipient.externalGroupExact(context, GroupId.v2(masterKey));
 
         threadDatabase.applyStorageSyncUpdate(recipient.getId(), update.getNew());
         needsRefresh.add(recipient.getId());
@@ -1120,7 +1219,7 @@ public class RecipientDatabase extends Database {
     }
 
     for (GroupId.V2 id : DatabaseFactory.getGroupDatabase(context).getAllGroupV2Ids()) {
-      Recipient         recipient                = Recipient.externalGroup(context, id);
+      Recipient         recipient                = Recipient.externalGroupExact(context, id);
       RecipientId       recipientId              = recipient.getId();
       RecipientSettings recipientSettingsForSync = getRecipientSettingsForSync(recipientId);
 
@@ -1141,7 +1240,11 @@ public class RecipientDatabase extends Database {
   }
 
   static @NonNull RecipientSettings getRecipientSettings(@NonNull Context context, @NonNull Cursor cursor) {
-    long    id                         = CursorUtil.requireLong(cursor, ID);
+    return getRecipientSettings(context, cursor, ID);
+  }
+
+  static @NonNull RecipientSettings getRecipientSettings(@NonNull Context context, @NonNull Cursor cursor, @NonNull String idColumnName) {
+    long    id                         = CursorUtil.requireLong(cursor, idColumnName);
     UUID    uuid                       = UuidUtil.parseOrNull(CursorUtil.requireString(cursor, UUID));
     String  username                   = CursorUtil.requireString(cursor, USERNAME);
     String  e164                       = CursorUtil.requireString(cursor, PHONE);
@@ -1173,14 +1276,16 @@ public class RecipientDatabase extends Database {
     String  notificationChannel        = CursorUtil.requireString(cursor, NOTIFICATION_CHANNEL);
     int     unidentifiedAccessMode     = CursorUtil.requireInt(cursor, UNIDENTIFIED_ACCESS_MODE);
     boolean forceSmsSelection          = CursorUtil.requireBoolean(cursor, FORCE_SMS_SELECTION);
-    int     uuidCapabilityValue        = CursorUtil.requireInt(cursor, UUID_CAPABILITY);
-    int     groupsV2CapabilityValue    = CursorUtil.requireInt(cursor, GROUPS_V2_CAPABILITY);
+    long    capabilities               = CursorUtil.requireLong(cursor, CAPABILITIES);
     String  storageKeyRaw              = CursorUtil.requireString(cursor, STORAGE_SERVICE_ID);
     int     mentionSettingId           = CursorUtil.requireInt(cursor, MENTION_SETTING);
+    byte[]  wallpaper                  = CursorUtil.requireBlob(cursor, WALLPAPER);
+    String  about                      = CursorUtil.requireString(cursor, ABOUT);
+    String  aboutEmoji                 = CursorUtil.requireString(cursor, ABOUT_EMOJI);
 
-    MaterialColor color;
-    byte[]        profileKey           = null;
-    byte[]        profileKeyCredential = null;
+    MaterialColor        color;
+    byte[]               profileKey           = null;
+    ProfileKeyCredential profileKeyCredential = null;
 
     try {
       color = serializedColor == null ? null : MaterialColor.fromSerialized(serializedColor);
@@ -1199,15 +1304,32 @@ public class RecipientDatabase extends Database {
 
       if (profileKeyCredentialString != null) {
         try {
-          profileKeyCredential = Base64.decode(profileKeyCredentialString);
-        } catch (IOException e) {
-          Log.w(TAG, e);
-          profileKeyCredential = null;
+          byte[] columnDataBytes = Base64.decode(profileKeyCredentialString);
+
+          ProfileKeyCredentialColumnData columnData = ProfileKeyCredentialColumnData.parseFrom(columnDataBytes);
+
+          if (Arrays.equals(columnData.getProfileKey().toByteArray(), profileKey)) {
+            profileKeyCredential = new ProfileKeyCredential(columnData.getProfileKeyCredential().toByteArray());
+          } else {
+            Log.i(TAG, "Out of date profile key credential data ignored on read");
+          }
+        } catch (InvalidInputException | IOException e) {
+          Log.w(TAG, "Profile key credential column data could not be read", e);
         }
       }
     }
 
     byte[] storageKey = storageKeyRaw != null ? Base64.decodeOrThrow(storageKeyRaw) : null;
+
+    ChatWallpaper chatWallpaper = null;
+
+    if (wallpaper != null) {
+      try {
+        chatWallpaper = ChatWallpaperFactory.create(Wallpaper.parseFrom(wallpaper));
+      } catch (InvalidProtocolBufferException e) {
+        Log.w(TAG, "Failed to parse wallpaper.", e);
+      }
+    }
 
     return new RecipientSettings(RecipientId.from(id),
                                  uuid,
@@ -1240,11 +1362,13 @@ public class RecipientDatabase extends Database {
                                  notificationChannel,
                                  UnidentifiedAccessMode.fromMode(unidentifiedAccessMode),
                                  forceSmsSelection,
-                                 Recipient.Capability.deserialize(uuidCapabilityValue),
-                                 Recipient.Capability.deserialize(groupsV2CapabilityValue),
+                                 capabilities,
                                  InsightsBannerTier.fromId(insightsBannerTier),
                                  storageKey,
                                  MentionSetting.fromId(mentionSettingId),
+                                 chatWallpaper,
+                                 about,
+                                 aboutEmoji,
                                  getSyncExtras(cursor));
   }
 
@@ -1403,10 +1527,64 @@ public class RecipientDatabase extends Database {
     }
   }
 
+  public void markGroupsV1MigrationReminderSeen(@NonNull RecipientId id, long time) {
+    ContentValues values = new ContentValues(1);
+    values.put(LAST_GV1_MIGRATE_REMINDER, time);
+    if (update(id, values)) {
+      Recipient.live(id).refresh();
+    }
+  }
+
+  public long getGroupsV1MigrationReminderLastSeen(@NonNull RecipientId id) {
+    SQLiteDatabase db = databaseHelper.getReadableDatabase();
+
+    try (Cursor cursor = db.query(TABLE_NAME, new String[] { LAST_GV1_MIGRATE_REMINDER }, ID_WHERE, SqlUtil.buildArgs(id), null, null, null)) {
+      if (cursor.moveToFirst()) {
+        return CursorUtil.requireLong(cursor, LAST_GV1_MIGRATE_REMINDER);
+      }
+    }
+
+    return 0;
+  }
+
+
+  public void setLastSessionResetTime(@NonNull RecipientId id, DeviceLastResetTime lastResetTime) {
+    ContentValues values = new ContentValues(1);
+    values.put(LAST_SESSION_RESET, lastResetTime.toByteArray());
+    update(id, values);
+  }
+
+  public @NonNull DeviceLastResetTime getLastSessionResetTimes(@NonNull RecipientId id) {
+    SQLiteDatabase db = databaseHelper.getReadableDatabase();
+
+    try (Cursor cursor = db.query(TABLE_NAME, new String[] {LAST_SESSION_RESET}, ID_WHERE, SqlUtil.buildArgs(id), null, null, null)) {
+      if (cursor.moveToFirst()) {
+        try {
+          byte[] serialized = CursorUtil.requireBlob(cursor, LAST_SESSION_RESET);
+          if (serialized != null) {
+            return DeviceLastResetTime.parseFrom(serialized);
+          } else {
+            return DeviceLastResetTime.newBuilder().build();
+          }
+        } catch (InvalidProtocolBufferException | SQLException e) {
+          Log.w(TAG, e);
+          return DeviceLastResetTime.newBuilder().build();
+        }
+      }
+    }
+
+    return DeviceLastResetTime.newBuilder().build();
+  }
+
   public void setCapabilities(@NonNull RecipientId id, @NonNull SignalServiceProfile.Capabilities capabilities) {
-    ContentValues values = new ContentValues(2);
-    values.put(UUID_CAPABILITY,      Recipient.Capability.fromBoolean(capabilities.isUuid()).serialize());
-    values.put(GROUPS_V2_CAPABILITY, Recipient.Capability.fromBoolean(capabilities.isGv2()).serialize());
+    long value = 0;
+
+    value = Bitmask.update(value, Capabilities.GROUPS_V2,           Capabilities.BIT_LENGTH, Recipient.Capability.fromBoolean(capabilities.isGv2()).serialize());
+    value = Bitmask.update(value, Capabilities.GROUPS_V1_MIGRATION, Capabilities.BIT_LENGTH, Recipient.Capability.fromBoolean(capabilities.isGv1Migration()).serialize());
+
+    ContentValues values = new ContentValues(1);
+    values.put(CAPABILITIES, value);
+
     if (update(id, values)) {
       Recipient.live(id).refresh();
     }
@@ -1478,23 +1656,30 @@ public class RecipientDatabase extends Database {
   /**
    * Updates the profile key credential as long as the profile key matches.
    */
-  public void setProfileKeyCredential(@NonNull RecipientId id,
-                                      @NonNull ProfileKey profileKey,
-                                      @NonNull ProfileKeyCredential profileKeyCredential)
+  public boolean setProfileKeyCredential(@NonNull RecipientId id,
+                                         @NonNull ProfileKey profileKey,
+                                         @NonNull ProfileKeyCredential profileKeyCredential)
   {
     String        selection = ID + " = ? AND " + PROFILE_KEY + " = ?";
     String[]      args      = new String[]{id.serialize(), Base64.encodeBytes(profileKey.serialize())};
     ContentValues values    = new ContentValues(1);
 
-    values.put(PROFILE_KEY_CREDENTIAL, Base64.encodeBytes(profileKeyCredential.serialize()));
+    ProfileKeyCredentialColumnData columnData = ProfileKeyCredentialColumnData.newBuilder()
+                                                                              .setProfileKey(ByteString.copyFrom(profileKey.serialize()))
+                                                                              .setProfileKeyCredential(ByteString.copyFrom(profileKeyCredential.serialize()))
+                                                                              .build();
+
+    values.put(PROFILE_KEY_CREDENTIAL, Base64.encodeBytes(columnData.toByteArray()));
 
     SqlUtil.Query updateQuery = SqlUtil.buildTrueUpdateQuery(selection, args, values);
 
-    if (update(updateQuery, values)) {
-      // TODO [greyson] If we sync this in future, mark dirty
-      //markDirty(id, DirtyState.UPDATE);
+    boolean updated = update(updateQuery, values);
+
+    if (updated) {
       Recipient.live(id).refresh();
     }
+
+    return updated;
   }
 
   private void clearProfileKeyCredential(@NonNull RecipientId id) {
@@ -1556,6 +1741,27 @@ public class RecipientDatabase extends Database {
     return updated;
   }
 
+  public @NonNull List<RecipientId> getSimilarRecipientIds(@NonNull Recipient recipient) {
+    SQLiteDatabase db   = databaseHelper.getReadableDatabase();
+    String[] projection = SqlUtil.buildArgs(ID, "COALESCE(" + nullIfEmpty(SYSTEM_DISPLAY_NAME) + ", " + nullIfEmpty(PROFILE_JOINED_NAME) + ") AS checked_name");
+    String   where      =  "checked_name = ?";
+
+    String[] arguments = SqlUtil.buildArgs(recipient.getProfileName().toString());
+
+    try (Cursor cursor = db.query(TABLE_NAME, projection, where, arguments, null, null, null)) {
+      if (cursor == null || cursor.getCount() == 0) {
+        return Collections.emptyList();
+      }
+
+      List<RecipientId> results = new ArrayList<>(cursor.getCount());
+      while (cursor.moveToNext()) {
+        results.add(RecipientId.from(CursorUtil.requireLong(cursor, ID)));
+      }
+
+      return results;
+    }
+  }
+
   public void setProfileName(@NonNull RecipientId id, @NonNull ProfileName profileName) {
     ContentValues contentValues = new ContentValues(1);
     contentValues.put(PROFILE_GIVEN_NAME, profileName.getGivenName());
@@ -1581,6 +1787,16 @@ public class RecipientDatabase extends Database {
     }
   }
 
+  public void setAbout(@NonNull RecipientId id, @Nullable String about, @Nullable String emoji) {
+    ContentValues contentValues = new ContentValues();
+    contentValues.put(ABOUT, about);
+    contentValues.put(ABOUT_EMOJI, emoji);
+
+    if (update(id, contentValues)) {
+      Recipient.live(id).refresh();
+    }
+  }
+
   public void setProfileSharing(@NonNull RecipientId id, @SuppressWarnings("SameParameterValue") boolean enabled) {
     ContentValues contentValues = new ContentValues(1);
     contentValues.put(PROFILE_SHARING, enabled ? 1 : 0);
@@ -1601,6 +1817,134 @@ public class RecipientDatabase extends Database {
     if (update(id, contentValues)) {
       Recipient.live(id).refresh();
     }
+  }
+
+  public void resetAllWallpaper() {
+    SQLiteDatabase                  database      = databaseHelper.getWritableDatabase();
+    String[]                        selection     = SqlUtil.buildArgs(ID, WALLPAPER_URI);
+    String                          where         = WALLPAPER + " IS NOT NULL";
+    List<Pair<RecipientId, String>> idWithWallpaper = new LinkedList<>();
+
+    database.beginTransaction();
+
+    try {
+      try (Cursor cursor = database.query(TABLE_NAME, selection, where, null, null, null, null)) {
+        while (cursor != null && cursor.moveToNext()) {
+          idWithWallpaper.add(new Pair<>(RecipientId.from(CursorUtil.requireInt(cursor, ID)),
+                              CursorUtil.getString(cursor, WALLPAPER_URI).orNull()));
+        }
+      }
+
+      if (idWithWallpaper.isEmpty()) {
+        return;
+      }
+
+      ContentValues values = new ContentValues(2);
+      values.put(WALLPAPER_URI, (String) null);
+      values.put(WALLPAPER, (byte[]) null);
+
+      int rowsUpdated = database.update(TABLE_NAME, values, where, null);
+      if (rowsUpdated == idWithWallpaper.size()) {
+        for (Pair<RecipientId, String> pair : idWithWallpaper) {
+          Recipient.live(pair.first()).refresh();
+          if (pair.second() != null) {
+            WallpaperStorage.onWallpaperDeselected(context, Uri.parse(pair.second()));
+          }
+        }
+      } else {
+        throw new AssertionError("expected " + idWithWallpaper.size() + " but got " + rowsUpdated);
+      }
+
+    } finally {
+      database.setTransactionSuccessful();
+      database.endTransaction();
+    }
+
+  }
+
+  public void setWallpaper(@NonNull RecipientId id, @Nullable ChatWallpaper chatWallpaper) {
+    setWallpaper(id, chatWallpaper != null ? chatWallpaper.serialize() : null);
+  }
+
+  private void setWallpaper(@NonNull RecipientId id, @Nullable Wallpaper wallpaper) {
+    Uri existingWallpaperUri = getWallpaperUri(id);
+
+    ContentValues values = new ContentValues();
+    values.put(WALLPAPER, wallpaper != null ? wallpaper.toByteArray() : null);
+
+    if (wallpaper != null && wallpaper.hasFile()) {
+      values.put(WALLPAPER_URI, wallpaper.getFile().getUri());
+    } else {
+      values.putNull(WALLPAPER_URI);
+    }
+
+    if (update(id, values)) {
+      Recipient.live(id).refresh();
+    }
+
+    if (existingWallpaperUri != null) {
+      WallpaperStorage.onWallpaperDeselected(context, existingWallpaperUri);
+    }
+  }
+
+  public void setDimWallpaperInDarkTheme(@NonNull RecipientId id, boolean enabled) {
+    Wallpaper wallpaper = getWallpaper(id);
+
+    if (wallpaper == null) {
+      throw new IllegalStateException("No wallpaper set for " + id);
+    }
+
+    Wallpaper updated = wallpaper.toBuilder()
+                                 .setDimLevelInDarkTheme(enabled ? ChatWallpaper.FIXED_DIM_LEVEL_FOR_DARK_THEME : 0)
+                                 .build();
+
+    setWallpaper(id, updated);
+  }
+
+  private @Nullable Wallpaper getWallpaper(@NonNull RecipientId id) {
+    SQLiteDatabase db = databaseHelper.getReadableDatabase();
+
+    try (Cursor cursor = db.query(TABLE_NAME, new String[] {WALLPAPER}, ID_WHERE, SqlUtil.buildArgs(id), null, null, null)) {
+      if (cursor.moveToFirst()) {
+        byte[] raw = CursorUtil.requireBlob(cursor, WALLPAPER);
+
+        if (raw != null) {
+          try {
+            return Wallpaper.parseFrom(raw);
+          } catch (InvalidProtocolBufferException e) {
+            return null;
+          }
+        } else {
+          return null;
+        }
+      }
+    }
+
+    return null;
+  }
+
+  private @Nullable Uri getWallpaperUri(@NonNull RecipientId id) {
+    Wallpaper wallpaper = getWallpaper(id);
+
+    if (wallpaper != null && wallpaper.hasFile()) {
+      return Uri.parse(wallpaper.getFile().getUri());
+    } else {
+      return null;
+    }
+  }
+
+  public int getWallpaperUriUsageCount(@NonNull Uri uri) {
+    SQLiteDatabase db    = databaseHelper.getReadableDatabase();
+    String         query = WALLPAPER_URI + " = ?";
+    String[]       args  = SqlUtil.buildArgs(uri);
+
+    try (Cursor cursor = db.query(TABLE_NAME, new String[] { "COUNT(*)" }, query, args, null, null, null)) {
+      if (cursor.moveToFirst()) {
+        return cursor.getInt(0);
+      }
+    }
+
+    return 0;
   }
 
   /**
@@ -2123,7 +2467,7 @@ public class RecipientDatabase extends Database {
     }
 
     return Stream.of(recipientsWithinInteractionThreshold)
-                 .filterNot(Recipient::isLocalNumber)
+                 .filterNot(Recipient::isSelf)
                  .filter(r -> r.getLastProfileFetchTime() < lastProfileFetchThreshold)
                  .limit(limit)
                  .map(Recipient::getId)
@@ -2263,6 +2607,24 @@ public class RecipientDatabase extends Database {
   }
 
   /**
+   * Updates a group recipient with a new V2 group ID. Should only be done as a part of GV1->GV2
+   * migration.
+   */
+  void updateGroupId(@NonNull GroupId.V1 v1Id, @NonNull GroupId.V2 v2Id) {
+    ContentValues values = new ContentValues();
+    values.put(GROUP_ID, v2Id.toString());
+    values.put(GROUP_TYPE, GroupType.SIGNAL_V2.getId());
+
+    SqlUtil.Query query = SqlUtil.buildTrueUpdateQuery(GROUP_ID + " = ?", SqlUtil.buildArgs(v1Id), values);
+
+    if (update(query, values)) {
+      RecipientId id = getByGroupId(v2Id).get();
+      markDirty(id, DirtyState.UPDATE);
+      Recipient.live(id).refresh();
+    }
+  }
+
+  /**
    * Will update the database with the content values you specified. It will make an intelligent
    * query such that this will only return true if a row was *actually* updated.
    */
@@ -2372,7 +2734,7 @@ public class RecipientDatabase extends Database {
     uuidValues.put(SYSTEM_PHONE_LABEL, e164Settings.getSystemPhoneLabel());
     uuidValues.put(SYSTEM_CONTACT_URI, e164Settings.getSystemContactUri());
     uuidValues.put(PROFILE_SHARING, uuidSettings.isProfileSharing() || e164Settings.isProfileSharing());
-    uuidValues.put(GROUPS_V2_CAPABILITY, uuidSettings.getGroupsV2Capability() != Recipient.Capability.UNKNOWN ? uuidSettings.getGroupsV2Capability().serialize() : e164Settings.getGroupsV2Capability().serialize());
+    uuidValues.put(CAPABILITIES, Math.max(uuidSettings.getCapabilities(), e164Settings.getCapabilities()));
     uuidValues.put(MENTION_SETTING, uuidSettings.getMentionSetting() != MentionSetting.ALWAYS_NOTIFY ? uuidSettings.getMentionSetting().getId() : e164Settings.getMentionSetting().getId());
     if (uuidSettings.getProfileKey() != null) {
       updateProfileValuesForMerge(uuidValues, uuidSettings);
@@ -2454,7 +2816,7 @@ public class RecipientDatabase extends Database {
 
   private static void updateProfileValuesForMerge(@NonNull ContentValues values, @NonNull RecipientSettings settings) {
     values.put(PROFILE_KEY, settings.getProfileKey() != null ? Base64.encodeBytes(settings.getProfileKey()) : null);
-    values.put(PROFILE_KEY_CREDENTIAL, settings.getProfileKeyCredential() != null ? Base64.encodeBytes(settings.getProfileKeyCredential()) : null);
+    values.putNull(PROFILE_KEY_CREDENTIAL);
     values.put(SIGNAL_PROFILE_AVATAR, settings.getProfileAvatar());
     values.put(PROFILE_GIVEN_NAME, settings.getProfileName().getGivenName());
     values.put(PROFILE_FAMILY_NAME, settings.getProfileName().getFamilyName());
@@ -2576,7 +2938,7 @@ public class RecipientDatabase extends Database {
     private final int                             expireMessages;
     private final RegisteredState                 registered;
     private final byte[]                          profileKey;
-    private final byte[]                          profileKeyCredential;
+    private final ProfileKeyCredential            profileKeyCredential;
     private final String                          systemDisplayName;
     private final String                          systemContactPhoto;
     private final String                          systemPhoneLabel;
@@ -2589,11 +2951,15 @@ public class RecipientDatabase extends Database {
     private final String                          notificationChannel;
     private final UnidentifiedAccessMode          unidentifiedAccessMode;
     private final boolean                         forceSmsSelection;
-    private final Recipient.Capability            uuidCapability;
+    private final long                            capabilities;
     private final Recipient.Capability            groupsV2Capability;
+    private final Recipient.Capability            groupsV1MigrationCapability;
     private final InsightsBannerTier              insightsBannerTier;
     private final byte[]                          storageId;
     private final MentionSetting                  mentionSetting;
+    private final ChatWallpaper                   wallpaper;
+    private final String                          about;
+    private final String                          aboutEmoji;
     private final SyncExtras                      syncExtras;
 
     RecipientSettings(@NonNull RecipientId id,
@@ -2614,7 +2980,7 @@ public class RecipientDatabase extends Database {
                       int expireMessages,
                       @NonNull  RegisteredState registered,
                       @Nullable byte[] profileKey,
-                      @Nullable byte[] profileKeyCredential,
+                      @Nullable ProfileKeyCredential profileKeyCredential,
                       @Nullable String systemDisplayName,
                       @Nullable String systemContactPhoto,
                       @Nullable String systemPhoneLabel,
@@ -2627,50 +2993,56 @@ public class RecipientDatabase extends Database {
                       @Nullable String notificationChannel,
                       @NonNull UnidentifiedAccessMode unidentifiedAccessMode,
                       boolean forceSmsSelection,
-                      Recipient.Capability uuidCapability,
-                      Recipient.Capability groupsV2Capability,
+                      long capabilities,
                       @NonNull InsightsBannerTier insightsBannerTier,
                       @Nullable byte[] storageId,
                       @NonNull MentionSetting mentionSetting,
+                      @Nullable ChatWallpaper wallpaper,
+                      @Nullable String about,
+                      @Nullable String aboutEmoji,
                       @NonNull SyncExtras syncExtras)
     {
-      this.id                     = id;
-      this.uuid                   = uuid;
-      this.username               = username;
-      this.e164                   = e164;
-      this.email                  = email;
-      this.groupId                = groupId;
-      this.groupType              = groupType;
-      this.blocked                = blocked;
-      this.muteUntil              = muteUntil;
-      this.messageVibrateState    = messageVibrateState;
-      this.callVibrateState       = callVibrateState;
-      this.messageRingtone        = messageRingtone;
-      this.callRingtone           = callRingtone;
-      this.color                  = color;
-      this.defaultSubscriptionId  = defaultSubscriptionId;
-      this.expireMessages         = expireMessages;
-      this.registered             = registered;
-      this.profileKey             = profileKey;
-      this.profileKeyCredential   = profileKeyCredential;
-      this.systemDisplayName      = systemDisplayName;
-      this.systemContactPhoto     = systemContactPhoto;
-      this.systemPhoneLabel       = systemPhoneLabel;
-      this.systemContactUri       = systemContactUri;
-      this.signalProfileName      = signalProfileName;
-      this.signalProfileAvatar    = signalProfileAvatar;
-      this.hasProfileImage        = hasProfileImage;
-      this.profileSharing         = profileSharing;
-      this.lastProfileFetch       = lastProfileFetch;
-      this.notificationChannel    = notificationChannel;
-      this.unidentifiedAccessMode = unidentifiedAccessMode;
-      this.forceSmsSelection      = forceSmsSelection;
-      this.uuidCapability         = uuidCapability;
-      this.groupsV2Capability     = groupsV2Capability;
-      this.insightsBannerTier     = insightsBannerTier;
-      this.storageId              = storageId;
-      this.mentionSetting         = mentionSetting;
-      this.syncExtras             = syncExtras;
+      this.id                          = id;
+      this.uuid                        = uuid;
+      this.username                    = username;
+      this.e164                        = e164;
+      this.email                       = email;
+      this.groupId                     = groupId;
+      this.groupType                   = groupType;
+      this.blocked                     = blocked;
+      this.muteUntil                   = muteUntil;
+      this.messageVibrateState         = messageVibrateState;
+      this.callVibrateState            = callVibrateState;
+      this.messageRingtone             = messageRingtone;
+      this.callRingtone                = callRingtone;
+      this.color                       = color;
+      this.defaultSubscriptionId       = defaultSubscriptionId;
+      this.expireMessages              = expireMessages;
+      this.registered                  = registered;
+      this.profileKey                  = profileKey;
+      this.profileKeyCredential        = profileKeyCredential;
+      this.systemDisplayName           = systemDisplayName;
+      this.systemContactPhoto          = systemContactPhoto;
+      this.systemPhoneLabel            = systemPhoneLabel;
+      this.systemContactUri            = systemContactUri;
+      this.signalProfileName           = signalProfileName;
+      this.signalProfileAvatar         = signalProfileAvatar;
+      this.hasProfileImage             = hasProfileImage;
+      this.profileSharing              = profileSharing;
+      this.lastProfileFetch            = lastProfileFetch;
+      this.notificationChannel         = notificationChannel;
+      this.unidentifiedAccessMode      = unidentifiedAccessMode;
+      this.forceSmsSelection           = forceSmsSelection;
+      this.capabilities                = capabilities;
+      this.groupsV2Capability          = Recipient.Capability.deserialize((int) Bitmask.read(capabilities, Capabilities.GROUPS_V2, Capabilities.BIT_LENGTH));
+      this.groupsV1MigrationCapability = Recipient.Capability.deserialize((int) Bitmask.read(capabilities, Capabilities.GROUPS_V1_MIGRATION, Capabilities.BIT_LENGTH));
+      this.insightsBannerTier          = insightsBannerTier;
+      this.storageId                   = storageId;
+      this.mentionSetting              = mentionSetting;
+      this.wallpaper                   = wallpaper;
+      this.about                       = about;
+      this.aboutEmoji                  = aboutEmoji;
+      this.syncExtras                  = syncExtras;
     }
 
     public RecipientId getId() {
@@ -2749,7 +3121,7 @@ public class RecipientDatabase extends Database {
       return profileKey;
     }
 
-    public @Nullable byte[] getProfileKeyCredential() {
+    public @Nullable ProfileKeyCredential getProfileKeyCredential() {
       return profileKeyCredential;
     }
 
@@ -2801,12 +3173,12 @@ public class RecipientDatabase extends Database {
       return forceSmsSelection;
     }
 
-    public Recipient.Capability getUuidCapability() {
-      return uuidCapability;
+    public @NonNull Recipient.Capability getGroupsV2Capability() {
+      return groupsV2Capability;
     }
 
-    public Recipient.Capability getGroupsV2Capability() {
-      return groupsV2Capability;
+    public @NonNull Recipient.Capability getGroupsV1MigrationCapability() {
+      return groupsV1MigrationCapability;
     }
 
     public @Nullable byte[] getStorageId() {
@@ -2817,8 +3189,24 @@ public class RecipientDatabase extends Database {
       return mentionSetting;
     }
 
+    public @Nullable ChatWallpaper getWallpaper() {
+      return wallpaper;
+    }
+
+    public @Nullable String getAbout() {
+      return about;
+    }
+
+    public @Nullable String getAboutEmoji() {
+      return aboutEmoji;
+    }
+
     public @NonNull SyncExtras getSyncExtras() {
       return syncExtras;
+    }
+
+    long getCapabilities() {
+      return capabilities;
     }
 
     /**
@@ -2893,6 +3281,11 @@ public class RecipientDatabase extends Database {
       }
 
       return getCurrent();
+    }
+
+    public int getCount() {
+      if (cursor != null) return cursor.getCount();
+      else                return 0;
     }
 
     public void close() {

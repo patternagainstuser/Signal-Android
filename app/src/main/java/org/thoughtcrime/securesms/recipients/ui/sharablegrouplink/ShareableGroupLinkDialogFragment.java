@@ -18,7 +18,6 @@ import androidx.lifecycle.ViewModelProviders;
 
 import org.thoughtcrime.securesms.R;
 import org.thoughtcrime.securesms.groups.GroupId;
-import org.thoughtcrime.securesms.util.ThemeUtil;
 import org.thoughtcrime.securesms.util.ViewUtil;
 import org.thoughtcrime.securesms.util.views.SimpleProgressDialog;
 
@@ -43,9 +42,7 @@ public final class ShareableGroupLinkDialogFragment extends DialogFragment {
   @Override
   public void onCreate(@Nullable Bundle savedInstanceState) {
     super.onCreate(savedInstanceState);
-    
-    setStyle(STYLE_NO_FRAME, ThemeUtil.isDarkTheme(requireActivity()) ? R.style.TextSecure_DarkTheme_AnimatedDialog
-                                                                      : R.style.TextSecure_LightTheme_AnimatedDialog);
+    setStyle(STYLE_NO_FRAME, R.style.Signal_DayNight_Dialog_Animated);
   }
 
   @Override
@@ -73,15 +70,16 @@ public final class ShareableGroupLinkDialogFragment extends DialogFragment {
   }
 
   private void initializeViews(@NonNull View view) {
-    SwitchCompat shareableGroupLinkSwitch  = view.findViewById(R.id.shareable_group_link_enable_switch);
-    TextView     shareableGroupLinkDisplay = view.findViewById(R.id.shareable_group_link_display);
-    SwitchCompat approveNewMembersSwitch   = view.findViewById(R.id.shareable_group_link_approve_new_members_switch);
-    View         shareableGroupLinkRow     = view.findViewById(R.id.shareable_group_link_row);
-    View         shareRow                  = view.findViewById(R.id.shareable_group_link_share_row);
-    View         resetLinkRow              = view.findViewById(R.id.shareable_group_link_reset_link_row);
-    View         approveNewMembersRow      = view.findViewById(R.id.shareable_group_link_approve_new_members_row);
-    View         membersSectionHeader      = view.findViewById(R.id.shareable_group_link_member_requests_section_header);
-    View         descriptionRow            = view.findViewById(R.id.shareable_group_link_display_row2);
+    SwitchCompat shareableGroupLinkSwitch     = view.findViewById(R.id.shareable_group_link_enable_switch);
+    TextView     shareableGroupLinkDisplay    = view.findViewById(R.id.shareable_group_link_display);
+    View         shareableGroupLinkDisplayRow = view.findViewById(R.id.shareable_group_link_display_row);
+    SwitchCompat approveNewMembersSwitch      = view.findViewById(R.id.shareable_group_link_approve_new_members_switch);
+    View         shareableGroupLinkRow        = view.findViewById(R.id.shareable_group_link_row);
+    View         shareRow                     = view.findViewById(R.id.shareable_group_link_share_row);
+    View         resetLinkRow                 = view.findViewById(R.id.shareable_group_link_reset_link_row);
+    View         approveNewMembersRow         = view.findViewById(R.id.shareable_group_link_approve_new_members_row);
+    View         membersSectionHeader         = view.findViewById(R.id.shareable_group_link_member_requests_section_header);
+    View         descriptionRow               = view.findViewById(R.id.shareable_group_link_display_row2);
 
     Toolbar toolbar = view.findViewById(R.id.shareable_group_link_toolbar);
 
@@ -92,7 +90,7 @@ public final class ShareableGroupLinkDialogFragment extends DialogFragment {
       approveNewMembersSwitch.setChecked(groupLink.isRequiresApproval());
       shareableGroupLinkDisplay.setText(formatForFullWidthWrapping(groupLink.getUrl()));
 
-      ViewUtil.setEnabledRecursive(shareableGroupLinkDisplay, groupLink.isEnabled());
+      shareableGroupLinkDisplayRow.setVisibility(groupLink.isEnabled() ? View.VISIBLE : View.GONE);
       ViewUtil.setEnabledRecursive(shareRow, groupLink.isEnabled());
       ViewUtil.setEnabledRecursive(resetLinkRow, groupLink.isEnabled());
       ViewUtil.setEnabledRecursive(membersSectionHeader, groupLink.isEnabled());

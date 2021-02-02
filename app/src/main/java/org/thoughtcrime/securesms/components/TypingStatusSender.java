@@ -1,10 +1,11 @@
 package org.thoughtcrime.securesms.components;
 
 import android.annotation.SuppressLint;
+import android.app.Application;
 import android.content.Context;
+
 import androidx.annotation.NonNull;
 
-import org.thoughtcrime.securesms.ApplicationContext;
 import org.thoughtcrime.securesms.dependencies.ApplicationDependencies;
 import org.thoughtcrime.securesms.jobs.TypingSendJob;
 import org.thoughtcrime.securesms.util.Util;
@@ -21,11 +22,9 @@ public class TypingStatusSender {
   private static final long REFRESH_TYPING_TIMEOUT = TimeUnit.SECONDS.toMillis(10);
   private static final long PAUSE_TYPING_TIMEOUT   = TimeUnit.SECONDS.toMillis(3);
 
-  private final Context              context;
   private final Map<Long, TimerPair> selfTypingTimers;
 
-  public TypingStatusSender(@NonNull Context context) {
-    this.context          = context;
+  public TypingStatusSender() {
     this.selfTypingTimers = new HashMap<>();
   }
 
@@ -52,6 +51,10 @@ public class TypingStatusSender {
 
   public synchronized void onTypingStopped(long threadId) {
     onTypingStopped(threadId, false);
+  }
+
+  public synchronized void onTypingStoppedWithNotify(long threadId) {
+    onTypingStopped(threadId, true);
   }
 
   private synchronized void onTypingStopped(long threadId, boolean notify) {

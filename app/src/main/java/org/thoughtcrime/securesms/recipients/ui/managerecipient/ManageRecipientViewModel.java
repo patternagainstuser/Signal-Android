@@ -29,6 +29,7 @@ import org.thoughtcrime.securesms.groups.ui.GroupMemberEntry;
 import org.thoughtcrime.securesms.groups.ui.addtogroup.AddToGroupsActivity;
 import org.thoughtcrime.securesms.keyvalue.SignalStore;
 import org.thoughtcrime.securesms.notifications.NotificationChannels;
+import org.thoughtcrime.securesms.phonenumbers.PhoneNumberFormatter;
 import org.thoughtcrime.securesms.recipients.Recipient;
 import org.thoughtcrime.securesms.recipients.RecipientId;
 import org.thoughtcrime.securesms.recipients.RecipientUtil;
@@ -62,6 +63,7 @@ public final class ManageRecipientViewModel extends ViewModel {
   private final LiveData<Boolean>                                canCollapseMemberList;
   private final DefaultValueLiveData<CollapseState>              groupListCollapseState;
   private final LiveData<Boolean>                                canBlock;
+  private final LiveData<Boolean>                                canUnblock;
   private final LiveData<List<GroupMemberEntry.FullMember>>      visibleSharedGroups;
   private final LiveData<String>                                 sharedGroupsCountSummary;
   private final LiveData<Boolean>                                canAddToAGroup;
@@ -78,7 +80,8 @@ public final class ManageRecipientViewModel extends ViewModel {
     this.disappearingMessageTimer  = Transformations.map(this.recipient, r -> ExpirationUtil.getExpirationDisplayValue(context, r.getExpireMessages()));
     this.muteState                 = Transformations.map(this.recipient, r -> new MuteState(r.getMuteUntil(), r.isMuted()));
     this.hasCustomNotifications    = Transformations.map(this.recipient, r -> r.getNotificationChannel() != null || !NotificationChannels.supported());
-    this.canBlock                  = Transformations.map(this.recipient, r -> !r.isBlocked());
+    this.canBlock                  = Transformations.map(this.recipient, r -> RecipientUtil.isBlockable(r) && !r.isBlocked());
+    this.canUnblock                = Transformations.map(this.recipient, Recipient::isBlocked);
     this.internalDetails           = Transformations.map(this.recipient, this::populateInternalDetails);
 
     manageRecipientRepository.getThreadId(this::onThreadIdLoaded);
@@ -109,13 +112,13 @@ public final class ManageRecipientViewModel extends ViewModel {
 
     this.canAddToAGroup = LiveDataUtil.combineLatest(recipient,
                                                      localGroupCount,
-                                                     (r, count) -> count > 0 && r.isRegistered() && !r.isGroup() && !r.isLocalNumber());
+                                                     (r, count) -> count > 0 && r.isRegistered() && !r.isGroup() && !r.isSelf());
 
     manageRecipientRepository.getActiveGroupCount(localGroupCount::postValue);
   }
 
   private static @NonNull String getDisplayTitle(@NonNull Recipient recipient, @NonNull Context context) {
-    if (recipient.isLocalNumber()) {
+    if (recipient.isSelf()) {
       return context.getString(R.string.note_to_self);
     } else {
       return recipient.getDisplayName(context);
@@ -123,8 +126,8 @@ public final class ManageRecipientViewModel extends ViewModel {
   }
 
   private static @NonNull String getDisplaySubtitle(@NonNull Recipient recipient, @NonNull Context context) {
-    if (!recipient.isLocalNumber() && recipient.hasAUserSetDisplayName(context)) {
-      return recipient.getSmsAddress().or("").trim();
+    if (!recipient.isSelf() && recipient.hasAUserSetDisplayName(context)) {
+      return recipient.getSmsAddress().transform(PhoneNumberFormatter::prettyPrint).or("").trim();
     } else {
       return "";
     }
@@ -178,6 +181,10 @@ public final class ManageRecipientViewModel extends ViewModel {
 
   LiveData<Boolean> getCanBlock() {
     return canBlock;
+  }
+
+  LiveData<Boolean> getCanUnblock() {
+    return canUnblock;
   }
 
   void handleExpirationSelection(@NonNull Context context) {
@@ -284,13 +291,13 @@ public final class ManageRecipientViewModel extends ViewModel {
 
     String profileKeyBase64 = recipient.getProfileKey() != null ? Base64.encodeBytes(recipient.getProfileKey()) : "None";
     String profileKeyHex    = recipient.getProfileKey() != null ? Hex.toStringCondensed(recipient.getProfileKey()) : "None";
-    return String.format("-- Profile Name --\n%s\n\n" +
+    return String.format("-- Profile Name --\n[%s] [%s]\n\n" +
                          "-- Profile Sharing --\n%s\n\n" +
                          "-- Profile Key (Base64) --\n%s\n\n" +
                          "-- Profile Key (Hex) --\n%s\n\n" +
                          "-- UUID --\n%s\n\n" +
                          "-- RecipientId --\n%s",
-                         recipient.getProfileName().toString(),
+                         recipient.getProfileName().getGivenName(), recipient.getProfileName().getFamilyName(),
                          recipient.isProfileSharing(),
                          profileKeyBase64,
                          profileKeyHex,
